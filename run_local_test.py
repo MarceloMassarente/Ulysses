@@ -7,13 +7,13 @@ import os
 print("Starting Uvicorn server...")
 # Start the uvicorn server as a subprocess
 server_process = subprocess.Popen(
-    ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
+    ["python", "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "5522"],
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE
 )
 
-url = "http://127.0.0.1:8000/api/v1/extract"
-health_url = "http://127.0.0.1:8000/health"
+url = "http://127.0.0.1:5522/api/v1/extract"
+health_url = "http://127.0.0.1:5522/health"
 
 payload = {
   "text": "O Tribunal de Contas da União, no Acórdão 1234/2020-Plenário, determinou à Empresa Brasileira de Infraestrutura que cumpra o Art. 5º da Lei 8.666/1993, sob pena de multa de R$ 50.000,00.",

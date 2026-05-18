@@ -19,10 +19,10 @@ COPY . /app
 # Pre-download the model into the image during build time
 RUN python -c "from transformers import pipeline; pipeline('ner', model='dominguesm/legal-bert-ner-base-cased-ptbr', aggregation_strategy='simple')"
 
-EXPOSE 8000
+EXPOSE 5522
 
 # Uso do shell syntax (sem colchetes) para avaliar variáveis de ambiente dinamicamente.
 # No Railway, a variável $PORT é definida automaticamente pelo orquestrador deles.
-# O fallback `:-8000` garante que localmente, via docker-compose, ele use a porta 8000.
+# O fallback `:-5522` garante que localmente, via docker-compose, ele use a porta 5522.
 # Também tornamos o número de workers flexível (default 1 para Railway, evitando OOM em planos gratuitos).
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-1}
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers ${WORKERS:-1}

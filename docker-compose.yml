@@ -3,7 +3,7 @@ services:
     build: .
     container_name: ulysses_ner_node
     ports:
-      - "8000:8000"
+      - "5522:5522"
     environment:
       # Otimização para forçar uso correto das threads do processador em inferência CPU
       - OMP_NUM_THREADS=8 
