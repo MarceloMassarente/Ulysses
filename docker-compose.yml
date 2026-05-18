@@ -1,0 +1,11 @@
+services:
+  ulysses-ner-api:
+    build: .
+    container_name: ulysses_ner_node
+    ports:
+      - "8000:8000"
+    environment:
+      # Otimização para forçar uso correto das threads do processador em inferência CPU
+      - OMP_NUM_THREADS=8 
+      - MKL_NUM_THREADS=8
+    restart: unless-stopped
