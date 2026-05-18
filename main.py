@@ -97,10 +97,38 @@ async def extract_entities(request: ExtractRequest):
     start_time = time.time()
     
     try:
-        # Perform inference
-        predictions = ner_pipeline(request.text)
+        # BERT has a strict 512-token limit. For long legal texts (like a 30-page PDF),
+        # we must split the text into smaller chunks, process each, and merge the results.
+        # We chunk by paragraph with a safe limit of ~1000 characters (~200 tokens).
+        paragraphs = request.text.split("\n")
+        chunks = []
+        current_chunk = ""
+        chunk_limit = 1000
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            # If adding the paragraph exceeds the limit, save the current chunk and start a new one
+            if len(current_chunk) + len(para) < chunk_limit:
+                current_chunk += para + "\n"
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = para + "\n"
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        # Perform inference sequentially on each chunk
+        predictions = []
+        for chunk in chunks:
+            if not chunk:
+                continue
+            chunk_preds = ner_pipeline(chunk)
+            predictions.extend(chunk_preds)
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Erro na inferência: {str(e)}")
     
     entities = []
     for pred in predictions:
