@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
 
 # Pre-download the model into the image during build time
-RUN python -c "from transformers import pipeline; pipeline('ner', model='Bilaal/ulysses-ner-br', aggregation_strategy='simple')"
+RUN python -c "from transformers import pipeline; pipeline('ner', model='dominguesm/legal-bert-ner-base-cased-ptbr', aggregation_strategy='simple')"
 
 EXPOSE 8000
 

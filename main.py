@@ -13,7 +13,7 @@ from transformers import pipeline, AutoModelForTokenClassification, AutoTokenize
 os.environ["OMP_NUM_THREADS"] = os.environ.get("OMP_NUM_THREADS", "8")
 os.environ["MKL_NUM_THREADS"] = os.environ.get("MKL_NUM_THREADS", "8")
 
-model_id = "Bilaal/ulysses-ner-br"
+model_id = "dominguesm/legal-bert-ner-base-cased-ptbr"
 ner_pipeline = None
 
 @asynccontextmanager
