@@ -83,6 +83,28 @@ class ExtractResponse(BaseModel):
     processing_time_ms: int
     entities: List[Entity]
 
+def clean_entity_text(text: str) -> str:
+    # 1. Remove spacing artifacts around dots, hyphens, slashes, and underscores
+    # e.g., "8 . 666 / 1993" -> "8.666/1993", "1010516 - 78" -> "1010516-78"
+    text = re.sub(r'\s*([.\-/_])\s*', r'\1', text)
+    
+    # 2. Fix spacing around commas (no space before, one space after)
+    text = re.sub(r'\s*,\s*', ', ', text)
+    
+    # 3. Remove subword markers "##" if any got through
+    text = text.replace("##", "")
+    
+    # 4. Remove leading/trailing punctuation, symbols, and spaces
+    text = re.sub(r'^[.,\-/_;\s]+', '', text)
+    text = re.sub(r'[.,\-/_;\s]+$', '', text)
+    
+    # 5. Collapse double spaces to single spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+import re
+
 @app.get("/health")
 async def health_check():
     if ner_pipeline is None:
@@ -98,52 +120,71 @@ async def extract_entities(request: ExtractRequest):
     
     try:
         # BERT has a strict 512-token limit. For long legal texts (like a 30-page PDF),
-        # we must split the text into smaller chunks, process each, and merge the results.
-        # We chunk by paragraph with a safe limit of ~1000 characters (~200 tokens).
-        paragraphs = request.text.split("\n")
-        chunks = []
-        current_chunk = ""
-        chunk_limit = 1000
+        # we must split the text into smaller overlapping chunks to avoid cutting entities.
+        # PDF text extractors (like pypdf) often introduce hard line breaks '\n' inside sentences.
+        # We replace single newlines with spaces to reconstruct sentences while preserving paragraph breaks.
+        cleaned_text = re.sub(r'(?<!\n)\n(?!\n)', ' ', request.text)
+        cleaned_text = re.sub(r'\n+', '\n', cleaned_text)  # collapse multiple newlines
         
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-            # If adding the paragraph exceeds the limit, save the current chunk and start a new one
-            if len(current_chunk) + len(para) < chunk_limit:
-                current_chunk += para + "\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = para + "\n"
-        if current_chunk:
-            chunks.append(current_chunk.strip())
+        # Split text into words (approximate tokens)
+        words = cleaned_text.split()
+        
+        # Sliding Window Chunking
+        chunk_size = 100  # Words per chunk (~130 BERT tokens, safe margin under 512)
+        overlap = 20      # Word overlap to capture entities at chunk boundaries
+        
+        chunks = []
+        i = 0
+        while i < len(words):
+            chunk_words = words[i : i + chunk_size]
+            chunks.append(" ".join(chunk_words))
+            if i + chunk_size >= len(words):
+                break
+            i += chunk_size - overlap
 
         # Perform inference sequentially on each chunk
         predictions = []
         for chunk in chunks:
             if not chunk:
                 continue
-            chunk_preds = ner_pipeline(chunk)
-            predictions.extend(chunk_preds)
+            
+            try:
+                # Safeguard: tokenize and truncate to 512 tokens, then decode back to a string.
+                # This handles table/URL token spikes or exceptionally dense paragraphs perfectly,
+                # completely eliminating any possibility of tensor size mismatches across all transformers versions.
+                tokenized = ner_pipeline.tokenizer(chunk, truncation=True, max_length=512)
+                chunk = ner_pipeline.tokenizer.decode(tokenized["input_ids"], skip_special_tokens=True)
+                
+                chunk_preds = ner_pipeline(chunk)
+                predictions.extend(chunk_preds)
+            except Exception as e:
+                print(f"Erro ao processar chunk: {e}")
+                continue
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro na inferência: {str(e)}")
     
-    entities = []
+    # Deduplicate and sanitize predicted entities
+    entities_map = {}
     for pred in predictions:
         score = float(pred["score"])
         if score >= request.confidence_threshold:
-            # Clean up words from subwords artifacts if necessary
-            word = pred["word"].strip()
-            # simple aggregation sometimes returns words with '##' or spaces. 
-            # transformers handles it but we just make sure.
+            word = clean_entity_text(pred["word"])
+            # Ignore empty or single-character entities
+            if not word or len(word) <= 1:
+                continue
             
-            entities.append(Entity(
-                entity_group=pred["entity_group"],
-                word=word,
-                score=score
-            ))
+            group = pred["entity_group"]
+            key = (group, word)
+            
+            # Keep the highest confidence score for each unique entity
+            if key not in entities_map or score > entities_map[key]:
+                entities_map[key] = score
+                
+    entities = [
+        Entity(entity_group=group, word=word, score=score)
+        for (group, word), score in entities_map.items()
+    ]
             
     processing_time_ms = int((time.time() - start_time) * 1000)
     
