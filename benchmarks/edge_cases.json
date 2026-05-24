@@ -1,0 +1,92 @@
+[
+  {
+    "id": "leg_art_cf",
+    "category": "legislacao",
+    "text": "Viola o art. 5º, XXXII da Constituição Federal de 1988 e o art. 186 do Código Civil.",
+    "expect": [{"label": "LEGISLACAO", "contains": "186"}]
+  },
+  {
+    "id": "leg_art_lei",
+    "category": "legislacao",
+    "text": "Com fundamento no art. 39 da Lei 8.666/1993 e Decreto 7.357/2010.",
+    "expect": [{"label": "LEGISLACAO", "contains": "39"}, {"label": "LEGISLACAO", "contains": "8.666"}]
+  },
+  {
+    "id": "leg_paragrafo",
+    "category": "legislacao",
+    "text": "Aplica-se o § 2º do art. 927 do CC/2002.",
+    "expect": [{"label": "LEGISLACAO", "contains": "927"}]
+  },
+  {
+    "id": "juris_sumula_sem_tribunal",
+    "category": "jurisprudencia",
+    "text": "Conforme Súmula 7, não cabe recurso.",
+    "expect": [{"label": "JURISPRUDENCIA", "contains": "Súmula 7"}]
+  },
+  {
+    "id": "juris_tema_stf",
+    "category": "jurisprudencia",
+    "text": "Tema 810 do STF sobre correção monetária contra a Fazenda.",
+    "expect": [{"label": "JURISPRUDENCIA", "contains": "Tema"}]
+  },
+  {
+    "id": "juris_apelacao",
+    "category": "jurisprudencia",
+    "text": "Apelação Cível nº 1234567-89.2020.8.26.0100 foi provida.",
+    "expect": [{"label": "JURISPRUDENCIA", "contains": "Apelação"}]
+  },
+  {
+    "id": "pessoa_oab",
+    "category": "pessoa",
+    "text": "Dr. Carlos Mendes, OAB/SP 123.456, patrono do réu Banco Omni S.A.",
+    "expect": [{"label": "PESSOA", "contains": "Carlos"}, {"label": "ORGANIZACAO", "contains": "Omni"}]
+  },
+  {
+    "id": "local_comarca",
+    "category": "local",
+    "text": "Tramita na Comarca de Campinas, Foro Central, São Paulo/SP.",
+    "expect": [{"label": "LOCAL", "contains": "Campinas"}]
+  },
+  {
+    "id": "data_extenso",
+    "category": "data",
+    "text": "Sentença proferida em 15 de março de 2024, com prazo de 15 dias úteis.",
+    "expect": [{"label": "DATA", "contains": "15/03"}]
+  },
+  {
+    "id": "valor_sem_rs",
+    "category": "valor",
+    "text": "Condenação de 10.000,00 reais mais R$ 5.000,00.",
+    "expect": [{"label": "VALOR", "contains": "5.000"}]
+  },
+  {
+    "id": "processo_antigo",
+    "category": "processo",
+    "text": "Autos nº 123.456/SP e processo 1001234-56.2024.8.26.0100.",
+    "expect": [{"label": "PROCESSO", "contains": "1001234"}]
+  },
+  {
+    "id": "doutrina",
+    "category": "doutrina",
+    "text": "Conforme Marinoni, 2020, p. 45, e a doutrina de Humberto Theodoro Júnior.",
+    "expect": [{"label": "DOUTRINA", "contains": "Marinoni"}]
+  },
+  {
+    "id": "pdf_ocr_ruim",
+    "category": "ocr",
+    "text": "O C?digo Civil, em S?o Paulo, art. 186, BAN\nCO XPTO S.A.",
+    "expect": [{"label": "LEGISLACAO", "contains": "186"}, {"label": "ORGANIZACAO", "contains": "XPTO"}]
+  },
+  {
+    "id": "juris_resp_baixo_score",
+    "category": "jurisprudencia",
+    "text": "Nos termos do REsp 1.729.593/SP do STJ.",
+    "expect": [{"label": "JURISPRUDENCIA", "contains": "REsp 1.729"}]
+  },
+  {
+    "id": "cnpj_cpf",
+    "category": "estruturado",
+    "text": "Autor CPF 123.456.789-00, réu CNPJ 12.345.678/0001-90.",
+    "expect": [{"label": "CPF", "contains": "123.456"}, {"label": "CNPJ", "contains": "12.345"}]
+  }
+]

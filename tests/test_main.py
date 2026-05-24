@@ -117,3 +117,47 @@ def test_filters_juris_ner_noise() -> None:
     assert is_noisy_entity("JURISPRUDENCIA", "2024", source="ner")
     assert is_noisy_entity("JURISPRUDENCIA", "mula", source="ner")
     assert not is_noisy_entity("JURISPRUDENCIA", "REsp 1.234.567/SP", source="ner")
+
+
+def test_filters_oab_as_pessoa() -> None:
+    assert is_noisy_entity("PESSOA", "OAB/SP 123.456")
+    assert is_noisy_entity("PESSOA", "OAB")
+
+
+def test_regex_tema_and_apelacao() -> None:
+    text = "Tema 810 do STF. Apelacao Civel n 1234567-89.2020.8.26.0100."
+    found = regex_entities(text, 0.0)
+    words = [e["word"] for e in found if e["entity_group"] == "JURISPRUDENCIA"]
+    assert any("Tema 810" in w for w in words)
+    assert any("Apelacao" in w or "Apela" in w for w in words)
+
+
+def test_regex_advogado_comarca_data_valor() -> None:
+    text = (
+        "Dr. Carlos Mendes, OAB/SP 123.456. "
+        "Comarca de Campinas. "
+        "Sentença em 15 de março de 2024. "
+        "Condenação de 10.000,00 reais."
+    )
+    found = regex_entities(text, 0.0)
+    by_label = {e["entity_group"]: e["word"] for e in found}
+    assert "Carlos" in by_label.get("PESSOA", "")
+    assert "Campinas" in by_label.get("LOCAL", "")
+    assert any(e["entity_group"] == "DATA" and "15/03" in e["word"] for e in found)
+    assert any(e["entity_group"] == "VALOR" and "reais" in e["word"].lower() for e in found)
+
+
+def test_regex_doutrina() -> None:
+    text = "Conforme Marinoni, 2020, p. 45, e doutrina de Humberto Theodoro."
+    found = regex_entities(text, 0.0)
+    doutrina = [e["word"] for e in found if e["entity_group"] == "DOUTRINA"]
+    assert any("Marinoni" in w for w in doutrina)
+
+
+def test_normalize_pdf_rejoins_broken_org() -> None:
+    raw = "BAN\nCO XPTO S.A."
+    norm = normalize_pdf_text(raw)
+    assert "BANCO" in norm
+    found = regex_entities(norm, 0.0)
+    orgs = [e["word"] for e in found if e["entity_group"] == "ORGANIZACAO"]
+    assert any("XPTO" in w for w in orgs)

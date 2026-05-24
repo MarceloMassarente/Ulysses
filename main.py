@@ -37,11 +37,14 @@ REGEX_PATTERNS: dict[str, str] = {
     "CNPJ": r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b",
     "PROCESSO": r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b",
     "LEGISLACAO": (
-        r"\b(?:[Aa]rt(?:\.?o?|igo)?\.?\s+\d+[°º]?"
+        r"\b(?:§\s*\d+[°º]?\s+(?:do\s+)?)?"
+        r"(?:[Aa]rt(?:\.?o?|igo)?\.?\s+\d+[°º]?"
         r"|[Ll]ei\s+n?\.?\s*\d+(?:[.\d]+)*(?:/\d+)?)\b"
     ),
     "DATA": r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
-    "VALOR": r"\bR\$\s*[\d.,]+\b",
+    "VALOR": (
+        r"\b(?:R\$\s*[\d.,]+|\d{1,3}(?:\.\d{3})*,\d{2}\s+reais)\b"
+    ),
 }
 
 # Jurisprudência: alinhado ao citation extractor do RAGjuridico (verification/extractor.py)
@@ -69,11 +72,72 @@ _RE_ACORDAO_NOME = re.compile(
     re.IGNORECASE,
 )
 _RE_PROCESSO_CNJ = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
+_RE_TEMA = re.compile(
+    r"\bTema\s+(?:n[°º.]?\s*)?\d+"
+    r"(?:\s*(?:do|da|de)\s+(?:STF|STJ|TST|TSE|STM))?\b",
+    re.IGNORECASE,
+)
+_RE_RECURSO_ESTADUAL = re.compile(
+    r"\b(?:Apelação|Apelacao|Agravo|Embargos|Recurso|Reexame)"
+    r"\s+(?:Cível|Civel|Inominado|Ordinário|Ordinario|Extraordinário|Extraordinario)?"
+    r"(?:\s+n[°º.]?\s*)?\d[\d./-]*",
+    re.IGNORECASE,
+)
+_RE_ADVOGADO = re.compile(
+    r"\b(?:Dr\.?a?|Dra\.?)\s+"
+    r"([A-ZÁÉÍÓÚÂÊÔÃÇ][a-záéíóúâêôãç]+"
+    r"(?:\s+(?:da|de|do|dos|das)\s+[A-ZÁÉÍÓÚÂÊÔÃÇ][a-záéíóúâêôãç]+)*)",
+    re.UNICODE,
+)
+_RE_COMARCA = re.compile(
+    r"\bComarca\s+de\s+([A-ZÁÉÍÓÚÂÊÔÃÇ][a-záéíóúâêôãç]+(?:\s+[A-Za-záéíóúâêôãç.]+)*)",
+    re.IGNORECASE,
+)
+_RE_FORO = re.compile(
+    r"\bForo\s+([A-ZÁÉÍÓÚÂÊÔÃÇ][^\n,]{3,50})",
+    re.IGNORECASE,
+)
+_RE_DATA_EXTENSO = re.compile(
+    r"\b(\d{1,2})\s+de\s+"
+    r"(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|"
+    r"setembro|outubro|novembro|dezembro)\s+de\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_RE_DOUTRINA_CITACAO = re.compile(
+    r"\b([A-ZÁÉÍÓÚÂÊÔÃÇ][\wáéíóúâêôãç-]+),\s*\d{4},\s*p\.?\s*\d+\b",
+    re.UNICODE,
+)
+_RE_DOUTRINA_DE = re.compile(
+    r"\bdoutrina\s+de\s+([A-ZÁÉÍÓÚÂÊÔÃÇ][^\n,.]{3,80})",
+    re.IGNORECASE,
+)
+_RE_ORG_SA = re.compile(
+    r"\b([A-ZÁÉÍÓÚÂÊÔÃÇ][\wáéíóúâêôãç.]*(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÇ][\wáéíóúâêôãç.]*)*)\s+S\.?A\.?\b",
+    re.UNICODE,
+)
+
+_MESES: dict[str, int] = {
+    "janeiro": 1,
+    "fevereiro": 2,
+    "março": 3,
+    "marco": 3,
+    "abril": 4,
+    "maio": 5,
+    "junho": 6,
+    "julho": 7,
+    "agosto": 8,
+    "setembro": 9,
+    "outubro": 10,
+    "novembro": 11,
+    "dezembro": 12,
+}
 
 REGEX_JURISPRUDENCIA: tuple[re.Pattern[str], ...] = (
     _RE_SUMULA,
     _RE_ACORDAO,
     _RE_ACORDAO_NOME,
+    _RE_TEMA,
+    _RE_RECURSO_ESTADUAL,
 )
 
 _NOISY_ORG_FRAGMENTS = frozenset(
@@ -130,7 +194,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Ulysses Legal NER API",
     description="Microservice for Legal Entity Extraction using legal-bert-ner",
-    version="1.2.1",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -194,6 +258,13 @@ def normalize_legal_text(text: str) -> str:
 
 def normalize_pdf_text(text: str) -> str:
     text = normalize_legal_text(text)
+    # Hifenização / quebra de linha em PDF (ex.: BAN-\nCO, BAN\nCO)
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
+    text = re.sub(
+        r"([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})\s*\n\s*([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})",
+        r"\1\2",
+        text,
+    )
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     return re.sub(r"\n+", "\n", text)
 
@@ -217,6 +288,11 @@ def is_noisy_jurisprudencia_ner(word: str) -> bool:
 def is_noisy_entity(group: str, word: str, source: str = "ner") -> bool:
     if not word or len(word) <= 1:
         return True
+    if group == "PESSOA" and (
+        word.upper() in ("OAB", "DR", "DRA", "PATRONO")
+        or re.search(r"\bOAB\s*/", word, re.IGNORECASE) is not None
+    ):
+        return True
     if group == "TEMPO" and (
         len(word) <= 3 or re.fullmatch(r"[\d\s./-]+", word) is not None
     ):
@@ -230,7 +306,8 @@ def is_noisy_entity(group: str, word: str, source: str = "ner") -> bool:
         return True
     if group == "JURISPRUDENCIA":
         if source == "regex":
-            return looks_like_process_number(word)
+            # Só descarta CNJ isolado; recursos formais (Apelação nº …) ficam.
+            return _RE_PROCESSO_CNJ.fullmatch(word.strip()) is not None
         return is_noisy_jurisprudencia_ner(word)
     return False
 
@@ -276,24 +353,121 @@ def reclassify_ner_predictions(predictions: list[dict[str, Any]]) -> list[dict[s
     return out
 
 
+def _append_regex_entity(
+    out: list[dict[str, Any]],
+    seen: set[tuple[str, int, int]],
+    *,
+    group: str,
+    word: str,
+    start: int,
+    end: int,
+) -> None:
+    word = clean_entity_text(word)
+    if not word or is_noisy_entity(group, word, source="regex"):
+        return
+    key = (group, start, end)
+    if key in seen:
+        return
+    seen.add(key)
+    out.append(
+        {
+            "entity_group": group,
+            "word": word,
+            "score": 0.99,
+            "start": start,
+            "end": end,
+            "source": "regex",
+        }
+    )
+
+
+def data_extenso_entities(text: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for match in _RE_DATA_EXTENSO.finditer(text):
+        day_s, month_name, year_s = match.groups()
+        month_num = _MESES.get(month_name.lower())
+        if not month_num:
+            continue
+        word = f"{int(day_s):02d}/{month_num:02d}/{year_s}"
+        _append_regex_entity(
+            out,
+            seen,
+            group="DATA",
+            word=word,
+            start=match.start(),
+            end=match.end(),
+        )
+    return out
+
+
+def structured_regex_entities(text: str) -> list[dict[str, Any]]:
+    """PESSOA, LOCAL, DOUTRINA e ORGANIZACAO via regex de alta precisão."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+
+    for match in _RE_ADVOGADO.finditer(text):
+        _append_regex_entity(
+            out,
+            seen,
+            group="PESSOA",
+            word=match.group(1),
+            start=match.start(1),
+            end=match.end(1),
+        )
+
+    for pattern, group in ((_RE_COMARCA, "LOCAL"), (_RE_FORO, "LOCAL")):
+        for match in pattern.finditer(text):
+            _append_regex_entity(
+                out,
+                seen,
+                group=group,
+                word=match.group(1),
+                start=match.start(1),
+                end=match.end(1),
+            )
+
+    for pattern in (_RE_DOUTRINA_CITACAO, _RE_DOUTRINA_DE):
+        for match in pattern.finditer(text):
+            word = match.group(1) if match.lastindex else match.group(0)
+            _append_regex_entity(
+                out,
+                seen,
+                group="DOUTRINA",
+                word=word,
+                start=match.start(1) if match.lastindex else match.start(),
+                end=match.end(1) if match.lastindex else match.end(),
+            )
+
+    for match in _RE_ORG_SA.finditer(text):
+        _append_regex_entity(
+            out,
+            seen,
+            group="ORGANIZACAO",
+            word=match.group(0),
+            start=match.start(),
+            end=match.end(),
+        )
+
+    return out
+
+
 def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
     for label, pattern in REGEX_PATTERNS.items():
-        for match in re.finditer(pattern, text):
-            word = clean_entity_text(match.group(0))
-            if not word or is_noisy_entity(label, word, source="regex"):
-                continue
-            out.append(
-                {
-                    "entity_group": label,
-                    "word": word,
-                    "score": 0.99,
-                    "start": match.start(),
-                    "end": match.end(),
-                    "source": "regex",
-                }
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            _append_regex_entity(
+                out,
+                seen,
+                group=label,
+                word=match.group(0),
+                start=match.start(),
+                end=match.end(),
             )
     out.extend(jurisprudence_regex_entities(text))
+    out.extend(data_extenso_entities(text))
+    out.extend(structured_regex_entities(text))
     _ = threshold
     return out
 
