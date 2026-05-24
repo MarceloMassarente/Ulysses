@@ -7,7 +7,8 @@ health_url = "http://192.168.1.221:5522/health"
 
 payload = {
   "text": "O Tribunal de Contas da União, no Acórdão 1234/2020-Plenário, determinou à Empresa Brasileira de Infraestrutura que cumpra o Art. 5º da Lei 8.666/1993, sob pena de multa de R$ 50.000,00.",
-  "confidence_threshold": 0.85
+  "confidence_threshold": 0.5,
+  "include_regex": True,
 }
 
 headers = {
