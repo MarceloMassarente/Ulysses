@@ -10,8 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from main import (  # noqa: E402
     clean_entity_text,
     is_noisy_entity,
+    jurisprudence_regex_entities,
     merge_predictions,
+    normalize_legal_text,
     normalize_pdf_text,
+    reclassify_ner_predictions,
     regex_entities,
 )
 
@@ -61,3 +64,44 @@ def test_normalize_pdf_text() -> None:
     raw = "linha um\nlinha dois\n\nparágrafo"
     norm = normalize_pdf_text(raw)
     assert "linha um linha dois" in norm
+
+
+def test_normalize_legal_text_fixes_sumula_typo() -> None:
+    assert "Súmula 7" in normalize_legal_text("Conforme Sumula 7 do STJ")
+
+
+def test_jurisprudence_regex_sumula_and_resp() -> None:
+    text = "Sumula 7 do STJ e REsp 1.234.567/SP aplicam-se."
+    found = jurisprudence_regex_entities(normalize_legal_text(text))
+    labels = {e["word"] for e in found}
+    assert any("Súmula 7" in w for w in labels)
+    assert any("REsp" in w for w in labels)
+
+
+def test_reclassify_legislacao_to_jurisprudencia() -> None:
+    preds = [
+        {"entity_group": "LEGISLACAO", "word": "Súmula 54 do STJ", "score": 0.8},
+        {"entity_group": "LEGISLACAO", "word": "art. 300", "score": 0.8},
+    ]
+    out = reclassify_ner_predictions(preds)
+    assert out[0]["entity_group"] == "JURISPRUDENCIA"
+    assert out[1]["entity_group"] == "LEGISLACAO"
+
+
+def test_jurisprudencia_ner_lower_threshold() -> None:
+    preds = [
+        {
+            "entity_group": "JURISPRUDENCIA",
+            "word": "REsp 1.729.593/SP",
+            "score": 0.42,
+            "source": "ner",
+        }
+    ]
+    out = merge_predictions(preds, threshold=0.5)
+    assert len(out) == 1
+
+
+def test_filters_cnj_as_jurisprudencia() -> None:
+    assert is_noisy_entity(
+        "JURISPRUDENCIA", "1010761-40.2024.8.26.0032-TJSP"
+    )

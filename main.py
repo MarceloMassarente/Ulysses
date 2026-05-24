@@ -27,6 +27,9 @@ MODEL_ID = os.environ.get(
 MAX_LENGTH = int(os.environ.get("LEGAL_NER_MAX_LENGTH", "512"))
 STRIDE = int(os.environ.get("LEGAL_NER_STRIDE", "128"))
 AGGREGATION = os.environ.get("LEGAL_NER_AGGREGATION", "first")
+JURISPRUDENCIA_NER_THRESHOLD = float(
+    os.environ.get("LEGAL_NER_JURISPRUDENCIA_THRESHOLD", "0.35")
+)
 
 REGEX_PATTERNS: dict[str, str] = {
     "CPF": r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b",
@@ -39,6 +42,33 @@ REGEX_PATTERNS: dict[str, str] = {
     "DATA": r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
     "VALOR": r"\bR\$\s*[\d.,]+\b",
 }
+
+# Jurisprudência: alinhado ao citation extractor do RAGjuridico (verification/extractor.py)
+_RE_SUMULA = re.compile(
+    r"\bS[uú]mula\s+(?:Vinculante\s+)?(?:n\.?\s*)?(\d+)"
+    r"(?:\s*(?:do|da|de|/)\s*(STJ|STF|TST|TSE|STM))?",
+    re.IGNORECASE,
+)
+_RE_ACORDAO = re.compile(
+    r"\b(REsp|AREsp|AgInt|AgRg|EREsp|HC|RHC|MS|RMS|ADI|ADC|ADPF|ARE|RE|AI|ACO|MI|PET|RCL)"
+    r"\.?\s*(?:n\.?\s*)?(\d[\d.]*(?:\/[A-Z]{2})?)",
+    re.IGNORECASE,
+)
+_RE_ACORDAO_NOME = re.compile(
+    r"\b[Aa]c[oó]rd[aã]o\s+(?:n\.?\s*)?(\d[\d./-]*)",
+    re.IGNORECASE,
+)
+_RE_PROCESSO_CNJ = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
+
+REGEX_JURISPRUDENCIA: tuple[re.Pattern[str], ...] = (
+    _RE_SUMULA,
+    _RE_ACORDAO,
+    _RE_ACORDAO_NOME,
+)
+
+_NOISY_ORG_FRAGMENTS = frozenset(
+    {"CO", "NI", "ST", "DF", "RC", "MA", "RI", "ER", "IR", "EL", "AN", "CE", "VA", "SP"}
+)
 
 ner_pipeline: Any = None
 
@@ -90,7 +120,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Ulysses Legal NER API",
     description="Microservice for Legal Entity Extraction using legal-bert-ner",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -141,9 +171,24 @@ def clean_entity_text(text: str) -> str:
     return text.strip()
 
 
+def normalize_legal_text(text: str) -> str:
+    """Corrige typos frequentes de PDF/OCR antes do NER."""
+    text = text.replace("Sumula", "Súmula").replace("sumula", "súmula")
+    text = text.replace("Acordao", "Acórdão").replace("acordao", "acórdão")
+    text = re.sub(r"\bC\?digo\b", "Código", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bC\?vel\b", "Cível", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bS\?o\b", "São", text, flags=re.IGNORECASE)
+    return text
+
+
 def normalize_pdf_text(text: str) -> str:
+    text = normalize_legal_text(text)
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     return re.sub(r"\n+", "\n", text)
+
+
+def looks_like_process_number(text: str) -> bool:
+    return _RE_PROCESSO_CNJ.search(text) is not None
 
 
 def is_noisy_entity(group: str, word: str) -> bool:
@@ -153,9 +198,57 @@ def is_noisy_entity(group: str, word: str) -> bool:
         len(word) <= 3 or re.fullmatch(r"[\d\s./-]+", word) is not None
     ):
         return True
-    if len(word) <= 2 and word.isupper() and group in ("PESSOA", "ORGANIZACAO", "LOCAL"):
+    if (
+        len(word) <= 3
+        and word.isupper()
+        and group in ("PESSOA", "ORGANIZACAO", "LOCAL")
+        and word in _NOISY_ORG_FRAGMENTS
+    ):
+        return True
+    if group == "JURISPRUDENCIA" and looks_like_process_number(word):
         return True
     return False
+
+
+def jurisprudence_regex_entities(text: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for pattern in REGEX_JURISPRUDENCIA:
+        for match in pattern.finditer(text):
+            word = clean_entity_text(match.group(0))
+            if not word or is_noisy_entity("JURISPRUDENCIA", word):
+                continue
+            key = (word, match.start(), match.end())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "entity_group": "JURISPRUDENCIA",
+                    "word": word,
+                    "score": 0.99,
+                    "start": match.start(),
+                    "end": match.end(),
+                    "source": "regex",
+                }
+            )
+    return out
+
+
+def reclassify_ner_predictions(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Súmula/REsp marcados como LEGISLACAO pelo modelo → JURISPRUDENCIA."""
+    out: list[dict[str, Any]] = []
+    for pred in predictions:
+        if pred.get("source") == "regex":
+            out.append(pred)
+            continue
+        word = clean_entity_text(str(pred.get("word", "")))
+        group = str(pred.get("entity_group", ""))
+        if group == "LEGISLACAO" and word:
+            if _RE_SUMULA.search(word) or _RE_ACORDAO.search(word):
+                pred = {**pred, "entity_group": "JURISPRUDENCIA"}
+        out.append(pred)
+    return out
 
 
 def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
@@ -175,6 +268,7 @@ def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
                     "source": "regex",
                 }
             )
+    out.extend(jurisprudence_regex_entities(text))
     _ = threshold
     return out
 
@@ -243,6 +337,14 @@ def run_ner_inference(cleaned_text: str) -> list[dict[str, Any]]:
     return predictions
 
 
+def _effective_threshold(group: str, source: str, threshold: float) -> float:
+    if source == "regex":
+        return 0.0
+    if group == "JURISPRUDENCIA":
+        return min(threshold, JURISPRUDENCIA_NER_THRESHOLD)
+    return threshold
+
+
 def merge_predictions(
     predictions: list[dict[str, Any]],
     threshold: float,
@@ -251,11 +353,11 @@ def merge_predictions(
     entities_map: dict[tuple[str, str], dict[str, Any]] = {}
 
     for pred in predictions:
-        score = float(pred.get("score", 0))
-        if score < threshold:
-            continue
-
         group = str(pred.get("entity_group", ""))
+        source = str(pred.get("source", "ner"))
+        score = float(pred.get("score", 0))
+        if score < _effective_threshold(group, source, threshold):
+            continue
         word = clean_entity_text(str(pred.get("word", "")))
         if is_noisy_entity(group, word):
             continue
@@ -303,6 +405,7 @@ async def health_check():
         "aggregation": AGGREGATION,
         "max_length": MAX_LENGTH,
         "stride": STRIDE,
+        "jurisprudencia_ner_threshold": JURISPRUDENCIA_NER_THRESHOLD,
     }
 
 
@@ -316,6 +419,7 @@ async def extract_entities(request: ExtractRequest):
     try:
         cleaned_text = normalize_pdf_text(request.text)
         predictions = await asyncio.to_thread(run_ner_inference, cleaned_text)
+        predictions = reclassify_ner_predictions(predictions)
 
         if request.include_regex:
             predictions.extend(regex_entities(cleaned_text, request.confidence_threshold))

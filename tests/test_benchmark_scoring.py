@@ -12,7 +12,7 @@ from benchmarks.scoring import BenchmarkCase, Expectation, load_cases, score_cas
 
 def test_load_cases_has_entries() -> None:
     cases = load_cases()
-    assert len(cases) >= 3
+    assert len(cases) >= 5
     assert any(c.id == "peticao_hibrida" for c in cases)
 
 

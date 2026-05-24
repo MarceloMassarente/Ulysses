@@ -10,4 +10,5 @@ services:
       - LEGAL_NER_AGGREGATION=first
       - LEGAL_NER_STRIDE=128
       - LEGAL_NER_MAX_LENGTH=512
+      - LEGAL_NER_JURISPRUDENCIA_THRESHOLD=0.35
     restart: unless-stopped
