@@ -102,6 +102,18 @@ def test_jurisprudencia_ner_lower_threshold() -> None:
 
 
 def test_filters_cnj_as_jurisprudencia() -> None:
-    assert is_noisy_entity(
-        "JURISPRUDENCIA", "1010761-40.2024.8.26.0032-TJSP"
-    )
+    assert is_noisy_entity("JURISPRUDENCIA", "1010761-40.2024.8.26.0032-TJSP")
+
+
+def test_jurisprudence_regex_accented_double_sumula() -> None:
+    text = "Súmula 7 do STJ e Súmula Vinculante 11 do STF"
+    found = jurisprudence_regex_entities(text)
+    words = [e["word"] for e in found]
+    assert any("Súmula 7" in w for w in words)
+    assert any("Vinculante" in w or "11" in w for w in words)
+
+
+def test_filters_juris_ner_noise() -> None:
+    assert is_noisy_entity("JURISPRUDENCIA", "2024", source="ner")
+    assert is_noisy_entity("JURISPRUDENCIA", "mula", source="ner")
+    assert not is_noisy_entity("JURISPRUDENCIA", "REsp 1.234.567/SP", source="ner")

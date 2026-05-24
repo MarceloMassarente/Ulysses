@@ -34,6 +34,19 @@
     "regex_only_must": ["JURISPRUDENCIA"]
   },
   {
+    "id": "sumula_acentuada_dupla",
+    "description": "Duas súmulas acentuadas com tribunal",
+    "text": "Súmula 7 do STJ e Súmula Vinculante 11 do STF",
+    "must_contain": [
+      {"label": "JURISPRUDENCIA", "text": "Súmula 7"},
+      {"label": "JURISPRUDENCIA", "text": "Vinculante 11"}
+    ],
+    "must_not_contain": [
+      {"label": "JURISPRUDENCIA", "text": "mula"}
+    ],
+    "regex_only_must": ["JURISPRUDENCIA"]
+  },
+  {
     "id": "sumula_sem_acento",
     "description": "Typo Sumula sem acento (normalização)",
     "text": "Conforme a Sumula 54 do STJ, aplicam-se os juros conforme art. 406 do CC.",

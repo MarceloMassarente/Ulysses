@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -45,8 +46,17 @@ REGEX_PATTERNS: dict[str, str] = {
 
 # Jurisprudência: alinhado ao citation extractor do RAGjuridico (verification/extractor.py)
 _RE_SUMULA = re.compile(
-    r"\bS[uú]mula\s+(?:Vinculante\s+)?(?:n\.?\s*)?(\d+)"
-    r"(?:\s*(?:do|da|de|/)\s*(STJ|STF|TST|TSE|STM))?",
+    r"\bS[uú]mula\s+"
+    r"(?:Vinculante\s+)?"
+    r"(?:n\.?\s*)?"
+    r"\d+"
+    r"(?:\s*(?:do|da|de|/)\s*(?:STJ|STF|TST|TSE|STM))?"
+    r"\b",
+    re.IGNORECASE,
+)
+_JURIS_MARKERS = re.compile(
+    r"S[uú]mula|REsp|AREsp|AgInt|AgRg|EREsp|HC|RHC|MS|RMS|ADI|ADC|ADPF|ARE|RE|AI|"
+    r"ACO|MI|PET|RCL|STJ|STF|TST|TSE|STM|Acórdão|Acordao",
     re.IGNORECASE,
 )
 _RE_ACORDAO = re.compile(
@@ -120,7 +130,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Ulysses Legal NER API",
     description="Microservice for Legal Entity Extraction using legal-bert-ner",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
 
@@ -173,6 +183,7 @@ def clean_entity_text(text: str) -> str:
 
 def normalize_legal_text(text: str) -> str:
     """Corrige typos frequentes de PDF/OCR antes do NER."""
+    text = unicodedata.normalize("NFC", text)
     text = text.replace("Sumula", "Súmula").replace("sumula", "súmula")
     text = text.replace("Acordao", "Acórdão").replace("acordao", "acórdão")
     text = re.sub(r"\bC\?digo\b", "Código", text, flags=re.IGNORECASE)
@@ -191,7 +202,19 @@ def looks_like_process_number(text: str) -> bool:
     return _RE_PROCESSO_CNJ.search(text) is not None
 
 
-def is_noisy_entity(group: str, word: str) -> bool:
+def is_noisy_jurisprudencia_ner(word: str) -> bool:
+    if len(word) < 5:
+        return True
+    if re.fullmatch(r"\d{4}", word):
+        return True
+    if not _JURIS_MARKERS.search(word):
+        return True
+    if looks_like_process_number(word):
+        return True
+    return False
+
+
+def is_noisy_entity(group: str, word: str, source: str = "ner") -> bool:
     if not word or len(word) <= 1:
         return True
     if group == "TEMPO" and (
@@ -205,8 +228,10 @@ def is_noisy_entity(group: str, word: str) -> bool:
         and word in _NOISY_ORG_FRAGMENTS
     ):
         return True
-    if group == "JURISPRUDENCIA" and looks_like_process_number(word):
-        return True
+    if group == "JURISPRUDENCIA":
+        if source == "regex":
+            return looks_like_process_number(word)
+        return is_noisy_jurisprudencia_ner(word)
     return False
 
 
@@ -216,7 +241,7 @@ def jurisprudence_regex_entities(text: str) -> list[dict[str, Any]]:
     for pattern in REGEX_JURISPRUDENCIA:
         for match in pattern.finditer(text):
             word = clean_entity_text(match.group(0))
-            if not word or is_noisy_entity("JURISPRUDENCIA", word):
+            if not word or is_noisy_entity("JURISPRUDENCIA", word, source="regex"):
                 continue
             key = (word, match.start(), match.end())
             if key in seen:
@@ -256,7 +281,7 @@ def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
     for label, pattern in REGEX_PATTERNS.items():
         for match in re.finditer(pattern, text):
             word = clean_entity_text(match.group(0))
-            if not word or is_noisy_entity(label, word):
+            if not word or is_noisy_entity(label, word, source="regex"):
                 continue
             out.append(
                 {
@@ -359,7 +384,7 @@ def merge_predictions(
         if score < _effective_threshold(group, source, threshold):
             continue
         word = clean_entity_text(str(pred.get("word", "")))
-        if is_noisy_entity(group, word):
+        if is_noisy_entity(group, word, source=source):
             continue
 
         start = pred.get("start")
