@@ -179,22 +179,68 @@ def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
     return out
 
 
+def _text_chunks(text: str, tokenizer: Any) -> list[str]:
+    """Split long text without passing tokenizer kwargs into pipeline.__call__."""
+    if tokenizer.is_fast:
+        encoded = tokenizer(
+            text,
+            return_overflowing_tokens=True,
+            max_length=MAX_LENGTH,
+            stride=STRIDE,
+            truncation=True,
+        )
+        return [
+            tokenizer.decode(ids, skip_special_tokens=True)
+            for ids in encoded["input_ids"]
+        ]
+
+    words = text.split()
+    chunk_words, overlap = 100, 20
+    chunks: list[str] = []
+    i = 0
+    while i < len(words):
+        piece = " ".join(words[i : i + chunk_words])
+        if piece:
+            chunks.append(piece)
+        if i + chunk_words >= len(words):
+            break
+        i += chunk_words - overlap
+    return chunks or [text]
+
+
+def _run_pipe_on_text(pipe: Any, text: str) -> list[dict[str, Any]]:
+    # transformers 5.x: only stride/aggregation_strategy accepted on __call__, not truncation.
+    if pipe.tokenizer.is_fast and len(text) > 400 and STRIDE > 0:
+        raw = pipe(text, stride=STRIDE)
+    else:
+        raw = pipe(text)
+    if isinstance(raw, dict):
+        return [raw]
+    return list(raw)
+
+
 def run_ner_inference(cleaned_text: str) -> list[dict[str, Any]]:
     if not cleaned_text.strip():
         return []
 
     pipe = ner_pipeline
-    kwargs: dict[str, Any] = {
-        "truncation": True,
-        "max_length": MAX_LENGTH,
-    }
-    if pipe.tokenizer.is_fast and len(cleaned_text) > 400:
-        kwargs["stride"] = STRIDE
+    text = cleaned_text
 
-    raw = pipe(cleaned_text, **kwargs)
-    if isinstance(raw, dict):
-        return [raw]
-    return list(raw)
+    # Short text: single pipeline call (no stride).
+    if len(text) <= 400:
+        return _run_pipe_on_text(pipe, text)
+
+    # Long text: stride when supported, else explicit token/word chunks.
+    if pipe.tokenizer.is_fast and STRIDE > 0:
+        try:
+            return _run_pipe_on_text(pipe, text)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Stride inference failed (%s); falling back to chunks", exc)
+
+    predictions: list[dict[str, Any]] = []
+    for chunk in _text_chunks(text, pipe.tokenizer):
+        predictions.extend(_run_pipe_on_text(pipe, chunk))
+    return predictions
 
 
 def merge_predictions(
