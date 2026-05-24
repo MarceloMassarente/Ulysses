@@ -1,0 +1,56 @@
+[
+  {
+    "id": "peticao_hibrida",
+    "description": "Petição com processo, valor, artigo e organização",
+    "text": "MARIA SANTOS move ação contra BANCO XPTO S.A., CNPJ 12.345.678/0001-90, processo 1001234-56.2024.8.26.0100, pedindo R$ 10.000,00 com fundamento no art. 300 do CPC e Súmula 7 do STJ.",
+    "must_contain": [
+      {"label": "ORGANIZACAO", "text": "BANCO XPTO"},
+      {"label": "LEGISLACAO", "text": "art"},
+      {"label": "PROCESSO", "text": "1001234-56.2024.8.26.0100"},
+      {"label": "VALOR", "text": "R$"},
+      {"label": "CNPJ", "text": "12.345.678/0001-90"}
+    ],
+    "must_not_contain": [
+      {"label": "TEMPO", "text": "10"},
+      {"label": "ORGANIZACAO", "text": "CO"}
+    ],
+    "regex_only_must": ["PROCESSO", "VALOR", "CNPJ"]
+  },
+  {
+    "id": "sentenca_citacoes",
+    "description": "Sentença com legislação e jurisprudência",
+    "text": "O juiz condenou o réu com base no art. 186 do Código Civil, art. 927, parágrafo único, e no REsp 1.234.567/SP do STJ, em São Paulo.",
+    "must_contain": [
+      {"label": "LEGISLACAO", "text": "186"},
+      {"label": "LOCAL", "text": "São Paulo"}
+    ],
+    "must_not_contain": [
+      {"label": "PESSOA", "text": "SP"},
+      {"label": "ORGANIZACAO", "text": "ST"}
+    ]
+  },
+  {
+    "id": "texto_curto_ruido",
+    "description": "Texto curto — calibrar threshold para não perder org",
+    "text": "O autor João da Silva ajuizou contra o Banco Omni S.A. com fundamento no art. 186 do Código Civil.",
+    "must_contain": [
+      {"label": "ORGANIZACAO", "text": "Omni"},
+      {"label": "LEGISLACAO", "text": "186"}
+    ],
+    "must_not_contain": [
+      {"label": "PESSOA", "text": "Joa"},
+      {"label": "ORGANIZACAO", "text": "ni"}
+    ]
+  },
+  {
+    "id": "pdf_quebras_linha",
+    "description": "Simula quebra de linha típica de pypdf",
+    "text": "Processo nº\n1001234-56.2024.8.26.0100\nValor de R$\n10.000,00\nart.\n300 do CPC",
+    "must_contain": [
+      {"label": "PROCESSO", "text": "1001234"},
+      {"label": "VALOR", "text": "10.000"},
+      {"label": "LEGISLACAO", "text": "300"}
+    ],
+    "must_not_contain": []
+  }
+]
