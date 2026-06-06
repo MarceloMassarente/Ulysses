@@ -20,7 +20,7 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers ${WORKERS:-1}"
+startCommand = "sh -c 'uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers ${WORKERS:-1}'"
 healthcheckPath = "/health"
 healthcheckTimeout = 600
 restartPolicyType = "ON_FAILURE"
