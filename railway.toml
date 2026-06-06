@@ -1,0 +1,31 @@
+# Railway — servico ulysses (Legal NER)
+# Repo: https://github.com/MarceloMassarente/Ulysses
+# Mesmo projeto Railway que RAGjuridico; repo Git separado.
+#
+# Settings:
+#   Nome do servico: ulysses
+#   Root Directory: /
+#   Config file path: railway.toml
+#   Dominio publico: nao (rede privada)
+#   RAM minima sugerida: 2 GB (PyTorch + legal-bert)
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+watchPatterns = [
+  "main.py",
+  "requirements.txt",
+  "Dockerfile",
+  ".dockerignore",
+]
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers ${WORKERS:-1}"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[deploy.limitOverride]
+[deploy.limitOverride.containers]
+memoryBytes = 2147483648
