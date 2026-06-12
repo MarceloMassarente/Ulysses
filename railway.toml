@@ -17,6 +17,7 @@ watchPatterns = [
   "requirements.txt",
   "Dockerfile",
   ".dockerignore",
+  "railway.toml",
 ]
 
 [deploy]
