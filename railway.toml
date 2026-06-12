@@ -7,7 +7,7 @@
 #   Root Directory: /
 #   Config file path: railway.toml
 #   Dominio publico: nao (rede privada)
-#   RAM minima sugerida: 2 GB (PyTorch + legal-bert)
+#   RAM minima sugerida: 8 GB (PyTorch + legal-bert)
 
 [build]
 builder = "DOCKERFILE"
@@ -28,4 +28,4 @@ restartPolicyMaxRetries = 10
 
 [deploy.limitOverride]
 [deploy.limitOverride.containers]
-memoryBytes = 2147483648
+memoryBytes = 8589934592
