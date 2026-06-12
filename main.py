@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
 import unicodedata
 from contextlib import asynccontextmanager
@@ -145,6 +146,7 @@ _NOISY_ORG_FRAGMENTS = frozenset(
 )
 
 ner_pipeline: Any = None
+_infer_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -503,10 +505,11 @@ def _text_chunks(text: str, tokenizer: Any) -> list[str]:
 
 def _run_pipe_on_text(pipe: Any, text: str) -> list[dict[str, Any]]:
     # transformers 5.x: only stride/aggregation_strategy accepted on __call__, not truncation.
-    if pipe.tokenizer.is_fast and len(text) > 400 and STRIDE > 0:
-        raw = pipe(text, stride=STRIDE)
-    else:
-        raw = pipe(text)
+    with _infer_lock:
+        if pipe.tokenizer.is_fast and len(text) > 400 and STRIDE > 0:
+            raw = pipe(text, stride=STRIDE)
+        else:
+            raw = pipe(text)
     if isinstance(raw, dict):
         return [raw]
     return list(raw)
