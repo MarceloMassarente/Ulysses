@@ -113,7 +113,11 @@ def extract_ner(text: str, label: str) -> tuple[list, float]:
     try:
         resp = requests.post(
             NER_API,
-            json={"text": text, "confidence_threshold": NER_THRESHOLD},
+            json={
+                "text": text,
+                "confidence_threshold": NER_THRESHOLD,
+                "include_regex": True,
+            },
             timeout=300,
         )
         elapsed = (time.time() - t0) * 1000

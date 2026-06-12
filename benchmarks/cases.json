@@ -5,9 +5,9 @@
     "text": "MARIA SANTOS move ação contra BANCO XPTO S.A., CNPJ 12.345.678/0001-90, processo 1001234-56.2024.8.26.0100, pedindo R$ 10.000,00 com fundamento no art. 300 do CPC e Súmula 7 do STJ.",
     "must_contain": [
       {"label": "ORGANIZACAO", "text": "BANCO XPTO"},
-      {"label": "LEGISLACAO", "text": "art"},
+      {"label": "LEGISLACAO", "text": "art. 300"},
       {"label": "PROCESSO", "text": "1001234-56.2024.8.26.0100"},
-      {"label": "VALOR", "text": "R$"},
+      {"label": "VALOR", "text": "R$ 10.000,00"},
       {"label": "CNPJ", "text": "12.345.678/0001-90"},
       {"label": "JURISPRUDENCIA", "text": "Súmula 7"}
     ],
@@ -16,7 +16,12 @@
       {"label": "ORGANIZACAO", "text": "CO"},
       {"label": "JURISPRUDENCIA", "text": "1001234"}
     ],
-    "regex_only_must": ["PROCESSO", "VALOR", "CNPJ", "JURISPRUDENCIA"]
+    "regex_only_must": [
+      {"label": "PROCESSO", "text": "1001234-56.2024.8.26.0100"},
+      {"label": "VALOR", "text": "R$ 10.000,00"},
+      {"label": "CNPJ", "text": "12.345.678/0001-90"},
+      {"label": "JURISPRUDENCIA", "text": "Súmula 7"}
+    ]
   },
   {
     "id": "sentenca_citacoes",
@@ -31,7 +36,7 @@
       {"label": "PESSOA", "text": "SP"},
       {"label": "ORGANIZACAO", "text": "ST"}
     ],
-    "regex_only_must": ["JURISPRUDENCIA"]
+    "regex_only_must": [{"label": "JURISPRUDENCIA", "text": "REsp 1.234.567"}]
   },
   {
     "id": "sumula_acentuada_dupla",
@@ -44,7 +49,7 @@
     "must_not_contain": [
       {"label": "JURISPRUDENCIA", "text": "mula"}
     ],
-    "regex_only_must": ["JURISPRUDENCIA"]
+    "regex_only_must": [{"label": "JURISPRUDENCIA", "text": "Súmula"}]
   },
   {
     "id": "sumula_sem_acento",
@@ -55,7 +60,7 @@
       {"label": "LEGISLACAO", "text": "406"}
     ],
     "must_not_contain": [],
-    "regex_only_must": ["JURISPRUDENCIA"]
+    "regex_only_must": [{"label": "JURISPRUDENCIA", "text": "Súmula 54"}]
   },
   {
     "id": "texto_curto_ruido",

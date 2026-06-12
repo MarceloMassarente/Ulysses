@@ -8,7 +8,7 @@ Microserviço Legal NER consumido pelo RAGjuridico via `LEGAL_NER_ENDPOINT`.
 2. Nome do servico: **`ulysses`** (para `${{ulysses.RAILWAY_PRIVATE_DOMAIN}}`)
 3. **Config file path**: `railway.toml`
 4. **Sem** dominio publico
-5. **RAM**: minimo **2 GB** (modelo PyTorch em memoria)
+5. **RAM**: minimo **8 GB** no dashboard Railway (modelo PyTorch em memoria)
 6. Variaveis opcionais: `deploy/railway/env.example`
 
 ## Integracao RAGjuridico
@@ -21,6 +21,6 @@ LEGAL_NER_ENDPOINT=http://${{ulysses.RAILWAY_PRIVATE_DOMAIN}}/api/v1/extract
 
 Endpoint exposto: `POST /api/v1/extract` (payload: `text`, `confidence_threshold`, `include_regex`).
 
-Health: `GET /health` (503 ate o modelo carregar — timeout 300s no primeiro deploy).
+Health: `GET /health` (durante cold start pode haver falha de conexao ate o app subir; depois 503 ate o modelo carregar).
 
 Guia stack completo: `RAGjuridico/docs/operations/deploy-railway-stack.md`

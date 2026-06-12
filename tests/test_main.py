@@ -47,10 +47,31 @@ def test_merge_predictions_dedup_and_text_field() -> None:
         },
     ]
     out = merge_predictions(preds, threshold=0.5)
+    assert len(out) == 2
+    assert all(e.text == "João da Silva" for e in out)
+    assert {e.start for e in out} == {10, 50}
+
+
+def test_merge_predictions_dedups_exact_same_span() -> None:
+    preds = [
+        {
+            "entity_group": "PESSOA",
+            "word": "João da Silva",
+            "score": 0.7,
+            "start": 10,
+            "end": 23,
+        },
+        {
+            "entity_group": "PESSOA",
+            "word": "João da Silva",
+            "score": 0.9,
+            "start": 10,
+            "end": 23,
+        },
+    ]
+    out = merge_predictions(preds, threshold=0.5)
     assert len(out) == 1
-    assert out[0].text == "João da Silva"
     assert out[0].score == 0.9
-    assert out[0].start == 10
 
 
 def test_regex_entities_finds_cnpj() -> None:
@@ -161,3 +182,27 @@ def test_normalize_pdf_rejoins_broken_org() -> None:
     found = regex_entities(norm, 0.0)
     orgs = [e["word"] for e in found if e["entity_group"] == "ORGANIZACAO"]
     assert any("XPTO" in w for w in orgs)
+
+
+def test_normalize_pdf_preserves_uppercase_connectors() -> None:
+    raw = "BANCO\nDO\nBRASIL S.A."
+    norm = normalize_pdf_text(raw)
+    assert "BANCO DO BRASIL" in norm
+    assert "BANCODO" not in norm
+
+
+def test_jurisprudencia_marker_requires_word_boundary() -> None:
+    assert is_noisy_entity("JURISPRUDENCIA", "parecer tecnico", source="ner")
+
+
+def test_regex_recurso_requires_formal_number() -> None:
+    found = regex_entities("recurso 2024 e Embargos 2", 0.0)
+    words = [e["word"] for e in found if e["entity_group"] == "JURISPRUDENCIA"]
+    assert not words
+
+
+def test_regex_common_unformatted_ids_and_lei_numero() -> None:
+    text = "CPF 12345678901 CNPJ 12345678000190 Lei nº 8.666/1993"
+    found = regex_entities(text, 0.0)
+    labels = {e["entity_group"] for e in found}
+    assert {"CPF", "CNPJ", "LEGISLACAO"} <= labels

@@ -21,7 +21,7 @@ class BenchmarkCase:
     text: str
     must_contain: list[Expectation] = field(default_factory=list)
     must_not_contain: list[Expectation] = field(default_factory=list)
-    regex_only_must: list[str] = field(default_factory=list)
+    regex_only_must: list[Expectation] = field(default_factory=list)
 
 
 @dataclass
@@ -53,7 +53,14 @@ def load_cases(path: Path | None = None) -> list[BenchmarkCase]:
                     Expectation(label=e["label"], text=e["text"])
                     for e in item.get("must_not_contain", [])
                 ],
-                regex_only_must=list(item.get("regex_only_must", [])),
+                regex_only_must=[
+                    (
+                        Expectation(label=e["label"], text=e.get("text", ""))
+                        if isinstance(e, dict)
+                        else Expectation(label=str(e), text="")
+                    )
+                    for e in item.get("regex_only_must", [])
+                ],
             )
         )
     return cases
@@ -126,9 +133,19 @@ def score_regex_only_labels(case: BenchmarkCase, entities: list[dict[str, Any]])
         return []
     rows = _entity_rows(entities)
     missing: list[str] = []
-    for label in case.regex_only_must:
-        if not any(l == label.upper() and s == "regex" for l, _t, s in rows):
-            missing.append(f"regex missing {label}")
+    for expect in case.regex_only_must:
+        if isinstance(expect, str):
+            expect = Expectation(label=expect, text="")
+        want_label = expect.label.upper()
+        needle = _norm(expect.text)
+        if not any(
+            label == want_label
+            and source == "regex"
+            and (not needle or needle in _norm(text))
+            for label, text, source in rows
+        ):
+            suffix = f" ~{expect.text!r}" if expect.text else ""
+            missing.append(f"regex missing {expect.label}{suffix}")
     return missing
 
 

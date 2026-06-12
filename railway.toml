@@ -7,7 +7,7 @@
 #   Root Directory: /
 #   Config file path: railway.toml
 #   Dominio publico: nao (rede privada)
-#   RAM minima sugerida: 8 GB (PyTorch + legal-bert)
+#   RAM minima sugerida: 8 GB (configurar no dashboard Railway; nao via config-as-code)
 
 [build]
 builder = "DOCKERFILE"
@@ -21,12 +21,8 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "sh -c 'uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers ${WORKERS:-1}'"
+startCommand = "sh -c 'exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-5522} --workers 1'"
 healthcheckPath = "/health"
 healthcheckTimeout = 600
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
-
-[deploy.limitOverride]
-[deploy.limitOverride.containers]
-memoryBytes = 8589934592

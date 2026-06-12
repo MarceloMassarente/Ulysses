@@ -119,7 +119,7 @@ def main() -> int:
     out = Path(__file__).parent / "benchmarks" / "edge_cases_report.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nRelatório: {out}")
-    return 0 if passed >= len(cases) * 0.5 else 1
+    return 0 if passed == len(cases) else 1
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import threading
@@ -11,6 +12,9 @@ import time
 import unicodedata
 from contextlib import asynccontextmanager
 from typing import Any
+
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "8"))
+os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "8"))
 
 import torch
 from fastapi import FastAPI, HTTPException
@@ -20,27 +24,44 @@ from transformers import AutoModelForTokenClassification, AutoTokenizer, pipelin
 
 logger = logging.getLogger("ulysses_ner")
 
-os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "8"))
-os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "8"))
-
 MODEL_ID = os.environ.get(
     "LEGAL_NER_MODEL", "dominguesm/legal-bert-ner-base-cased-ptbr"
 )
+MODEL_REVISION = os.environ.get("LEGAL_NER_MODEL_REVISION", "4421092")
 MAX_LENGTH = int(os.environ.get("LEGAL_NER_MAX_LENGTH", "512"))
 STRIDE = int(os.environ.get("LEGAL_NER_STRIDE", "128"))
+MAX_INPUT_CHARS = int(os.environ.get("LEGAL_NER_MAX_INPUT_CHARS", "50000"))
+DIRECT_PIPE_MAX_CHARS = int(os.environ.get("LEGAL_NER_DIRECT_PIPE_MAX_CHARS", "5000"))
+MAX_IN_FLIGHT = max(1, int(os.environ.get("LEGAL_NER_MAX_IN_FLIGHT", "1")))
+QUEUE_TIMEOUT_SECONDS = max(
+    0.0, float(os.environ.get("LEGAL_NER_QUEUE_TIMEOUT_SECONDS", "0.05"))
+)
+REQUEST_TIMEOUT_SECONDS = max(
+    0.0, float(os.environ.get("LEGAL_NER_REQUEST_TIMEOUT_SECONDS", "0"))
+)
 AGGREGATION = os.environ.get("LEGAL_NER_AGGREGATION", "first")
 JURISPRUDENCIA_NER_THRESHOLD = float(
     os.environ.get("LEGAL_NER_JURISPRUDENCIA_THRESHOLD", "0.35")
 )
+EXPOSE_HEALTH_CONFIG = os.environ.get("EXPOSE_HEALTH_CONFIG", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ENABLE_API_DOCS = os.environ.get("ENABLE_API_DOCS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 REGEX_PATTERNS: dict[str, str] = {
-    "CPF": r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b",
-    "CNPJ": r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b",
+    "CPF": r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b",
+    "CNPJ": r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b",
     "PROCESSO": r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b",
     "LEGISLACAO": (
         r"\b(?:§\s*\d+[°º]?\s+(?:do\s+)?)?"
         r"(?:[Aa]rt(?:\.?o?|igo)?\.?\s+\d+[°º]?"
-        r"|[Ll]ei\s+n?\.?\s*\d+(?:[.\d]+)*(?:/\d+)?)\b"
+        r"|[Ll]ei\s+n?[°º.]?\.?\s*\d+(?:[.\d]+)*(?:/\d+)?)\b"
     ),
     "DATA": r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
     "VALOR": (
@@ -59,8 +80,8 @@ _RE_SUMULA = re.compile(
     re.IGNORECASE,
 )
 _JURIS_MARKERS = re.compile(
-    r"S[uú]mula|REsp|AREsp|AgInt|AgRg|EREsp|HC|RHC|MS|RMS|ADI|ADC|ADPF|ARE|RE|AI|"
-    r"ACO|MI|PET|RCL|STJ|STF|TST|TSE|STM|Acórdão|Acordao",
+    r"\b(?:S[uú]mula|REsp|AREsp|AgInt|AgRg|EREsp|HC|RHC|MS|RMS|ADI|ADC|ADPF|"
+    r"ARE|RE|AI|ACO|MI|PET|RCL|STJ|STF|TST|TSE|STM|Acórdão|Acordao)\b",
     re.IGNORECASE,
 )
 _RE_ACORDAO = re.compile(
@@ -81,7 +102,7 @@ _RE_TEMA = re.compile(
 _RE_RECURSO_ESTADUAL = re.compile(
     r"\b(?:Apelação|Apelacao|Agravo|Embargos|Recurso|Reexame)"
     r"\s+(?:Cível|Civel|Inominado|Ordinário|Ordinario|Extraordinário|Extraordinario)?"
-    r"(?:\s+n[°º.]?\s*)?\d[\d./-]*",
+    r"(?:\s+n[°º.]?\.?\s*\d[\d./-]*|\s+\d{7,}[\d./-]*)",
     re.IGNORECASE,
 )
 _RE_ADVOGADO = re.compile(
@@ -144,9 +165,11 @@ REGEX_JURISPRUDENCIA: tuple[re.Pattern[str], ...] = (
 _NOISY_ORG_FRAGMENTS = frozenset(
     {"CO", "NI", "ST", "DF", "RC", "MA", "RI", "ER", "IR", "EL", "AN", "CE", "VA", "SP"}
 )
+_UPPERCASE_CONNECTORS = frozenset({"DA", "DE", "DO", "DAS", "DOS", "E"})
 
 ner_pipeline: Any = None
 _infer_lock = threading.Lock()
+_infer_slots = asyncio.Semaphore(MAX_IN_FLIGHT)
 
 
 @asynccontextmanager
@@ -165,8 +188,12 @@ async def lifespan(app: FastAPI):
         "Detected %s vCPUs; PyTorch threads=%s", available_cores, physical_cores
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, use_fast=True)
-    model = AutoModelForTokenClassification.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION, use_fast=True
+    )
+    model = AutoModelForTokenClassification.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION
+    )
 
     if not tokenizer.is_fast and AGGREGATION != "simple":
         logger.warning(
@@ -198,22 +225,35 @@ app = FastAPI(
     description="Microservice for Legal Entity Extraction using legal-bert-ner",
     version="1.3.0",
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
 )
 
-_cors_origins = os.environ.get("CORS_ORIGINS", "*").split(",")
+_cors_origins = os.environ.get("CORS_ORIGINS", "").split(",")
+_allowed_cors_origins = [o.strip() for o in _cors_origins if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
-    allow_credentials="*" not in _cors_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_allowed_cors_origins,
+    allow_credentials=bool(_allowed_cors_origins) and "*" not in _allowed_cors_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type"],
 )
 
 
 class ExtractRequest(BaseModel):
-    text: str = Field(..., description="The raw text to be processed")
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_INPUT_CHARS,
+        description="The raw text to be processed",
+    )
     confidence_threshold: float = Field(
-        0.0, description="Minimum confidence score for extracted entities"
+        0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Minimum confidence score for extracted entities",
     )
     include_regex: bool = Field(
         False,
@@ -263,12 +303,21 @@ def normalize_pdf_text(text: str) -> str:
     # Hifenização / quebra de linha em PDF (ex.: BAN-\nCO, BAN\nCO)
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
     text = re.sub(
-        r"([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})\s*\n\s*([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})",
-        r"\1\2",
+        r"\b([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})\s*\n\s*([A-ZÁÉÍÓÚÂÊÔÃÇ]{2,})\b",
+        _join_uppercase_line_break,
         text,
     )
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
     return re.sub(r"\n+", "\n", text)
+
+
+def _join_uppercase_line_break(match: re.Match[str]) -> str:
+    left, right = match.group(1), match.group(2)
+    if right in _UPPERCASE_CONNECTORS:
+        return f"{left} {right}"
+    if min(len(left), len(right)) <= 3:
+        return f"{left}{right}"
+    return f"{left} {right}"
 
 
 def looks_like_process_number(text: str) -> bool:
@@ -474,33 +523,63 @@ def regex_entities(text: str, threshold: float) -> list[dict[str, Any]]:
     return out
 
 
-def _text_chunks(text: str, tokenizer: Any) -> list[str]:
+def _text_chunks(text: str, tokenizer: Any) -> list[tuple[str, int]]:
     """Split long text without passing tokenizer kwargs into pipeline.__call__."""
     if tokenizer.is_fast:
-        encoded = tokenizer(
-            text,
-            return_overflowing_tokens=True,
-            max_length=MAX_LENGTH,
-            stride=STRIDE,
-            truncation=True,
-        )
-        return [
-            tokenizer.decode(ids, skip_special_tokens=True)
-            for ids in encoded["input_ids"]
-        ]
+        with _infer_lock:
+            encoded = tokenizer(
+                text,
+                return_overflowing_tokens=True,
+                return_offsets_mapping=True,
+                max_length=MAX_LENGTH,
+                stride=STRIDE,
+                truncation=True,
+            )
+        chunks: list[tuple[str, int]] = []
+        for offsets in encoded["offset_mapping"]:
+            valid_offsets = [(start, end) for start, end in offsets if end > start]
+            if not valid_offsets:
+                continue
+            start = min(start for start, _end in valid_offsets)
+            end = max(end for _start, end in valid_offsets)
+            chunk = text[start:end]
+            if chunk:
+                chunks.append((chunk, start))
+        return chunks or [(text, 0)]
 
     words = text.split()
     chunk_words, overlap = 100, 20
-    chunks: list[str] = []
+    chunks: list[tuple[str, int]] = []
     i = 0
+    search_from = 0
     while i < len(words):
         piece = " ".join(words[i : i + chunk_words])
         if piece:
-            chunks.append(piece)
+            start = text.find(piece, search_from)
+            if start < 0:
+                start = search_from
+            chunks.append((piece, start))
+            search_from = max(start + 1, search_from)
         if i + chunk_words >= len(words):
             break
         i += chunk_words - overlap
-    return chunks or [text]
+    return chunks or [(text, 0)]
+
+
+def _shift_prediction_offsets(
+    predictions: list[dict[str, Any]], base_offset: int
+) -> list[dict[str, Any]]:
+    if base_offset == 0:
+        return predictions
+    shifted: list[dict[str, Any]] = []
+    for pred in predictions:
+        item = dict(pred)
+        if isinstance(item.get("start"), int):
+            item["start"] += base_offset
+        if isinstance(item.get("end"), int):
+            item["end"] += base_offset
+        shifted.append(item)
+    return shifted
 
 
 def _run_pipe_on_text(pipe: Any, text: str) -> list[dict[str, Any]]:
@@ -527,15 +606,17 @@ def run_ner_inference(cleaned_text: str) -> list[dict[str, Any]]:
         return _run_pipe_on_text(pipe, text)
 
     # Long text: stride when supported, else explicit token/word chunks.
-    if pipe.tokenizer.is_fast and STRIDE > 0:
+    if pipe.tokenizer.is_fast and STRIDE > 0 and len(text) <= DIRECT_PIPE_MAX_CHARS:
         try:
             return _run_pipe_on_text(pipe, text)
         except (TypeError, ValueError) as exc:
             logger.warning("Stride inference failed (%s); falling back to chunks", exc)
 
     predictions: list[dict[str, Any]] = []
-    for chunk in _text_chunks(text, pipe.tokenizer):
-        predictions.extend(_run_pipe_on_text(pipe, chunk))
+    for chunk, base_offset in _text_chunks(text, pipe.tokenizer):
+        predictions.extend(
+            _shift_prediction_offsets(_run_pipe_on_text(pipe, chunk), base_offset)
+        )
     return predictions
 
 
@@ -551,8 +632,8 @@ def merge_predictions(
     predictions: list[dict[str, Any]],
     threshold: float,
 ) -> list[Entity]:
-    # Dedup by (label, span text); stride overlap may repeat the same entity with other offsets.
-    entities_map: dict[tuple[str, str], dict[str, Any]] = {}
+    # Dedup exact repeated spans from stride overlap while preserving repeated mentions.
+    entities_map: dict[tuple[str, str, int | None, int | None], dict[str, Any]] = {}
 
     for pred in predictions:
         group = str(pred.get("entity_group", ""))
@@ -569,7 +650,7 @@ def merge_predictions(
         start_i = int(start) if isinstance(start, int) else None
         end_i = int(end) if isinstance(end, int) else None
 
-        key = (group, word)
+        key = (group, word, start_i, end_i)
         existing = entities_map.get(key)
         if existing is None or score > float(existing["score"]):
             entities_map[key] = {
@@ -597,18 +678,96 @@ def merge_predictions(
     return entities
 
 
+def process_extraction(
+    text: str,
+    confidence_threshold: float,
+    include_regex: bool,
+) -> list[Entity]:
+    if not math.isfinite(confidence_threshold):
+        raise ValueError("confidence_threshold must be finite")
+
+    cleaned_text = normalize_pdf_text(text)
+    predictions = run_ner_inference(cleaned_text)
+    predictions = reclassify_ner_predictions(predictions)
+
+    if include_regex:
+        predictions.extend(regex_entities(cleaned_text, confidence_threshold))
+
+    return merge_predictions(predictions, confidence_threshold)
+
+
+async def _acquire_infer_slot() -> None:
+    try:
+        await asyncio.wait_for(_infer_slots.acquire(), timeout=QUEUE_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="NER inference is busy; retry later",
+        ) from exc
+
+
+def _release_slot_after_timeout(task: asyncio.Task[list[Entity]]) -> None:
+    try:
+        task.result()
+    except Exception:
+        logger.exception("Timed-out inference finished with error")
+    finally:
+        _infer_slots.release()
+
+
+async def _run_extraction_with_slot(request: ExtractRequest) -> list[Entity]:
+    await _acquire_infer_slot()
+    worker_task = asyncio.create_task(
+        asyncio.to_thread(
+            process_extraction,
+            request.text,
+            request.confidence_threshold,
+            request.include_regex,
+        )
+    )
+    release_in_finally = True
+    try:
+        if REQUEST_TIMEOUT_SECONDS > 0:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(worker_task),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                release_in_finally = False
+                worker_task.add_done_callback(_release_slot_after_timeout)
+                raise HTTPException(
+                    status_code=504,
+                    detail="NER inference timed out",
+                ) from exc
+        return await worker_task
+    finally:
+        if release_in_finally:
+            _infer_slots.release()
+
+
 @app.get("/health")
 async def health_check():
     if ner_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
-    return {
+    payload: dict[str, Any] = {
         "status": "ok",
-        "model": MODEL_ID,
-        "aggregation": AGGREGATION,
-        "max_length": MAX_LENGTH,
-        "stride": STRIDE,
-        "jurisprudencia_ner_threshold": JURISPRUDENCIA_NER_THRESHOLD,
+        "busy": _infer_slots.locked(),
     }
+    if EXPOSE_HEALTH_CONFIG:
+        payload.update(
+            {
+                "model": MODEL_ID,
+                "model_revision": MODEL_REVISION,
+                "aggregation": AGGREGATION,
+                "max_length": MAX_LENGTH,
+                "stride": STRIDE,
+                "max_input_chars": MAX_INPUT_CHARS,
+                "max_in_flight": MAX_IN_FLIGHT,
+                "jurisprudencia_ner_threshold": JURISPRUDENCIA_NER_THRESHOLD,
+            }
+        )
+    return payload
 
 
 @app.post("/api/v1/extract", response_model=ExtractResponse)
@@ -619,17 +778,14 @@ async def extract_entities(request: ExtractRequest):
     start_time = time.time()
 
     try:
-        cleaned_text = normalize_pdf_text(request.text)
-        predictions = await asyncio.to_thread(run_ner_inference, cleaned_text)
-        predictions = reclassify_ner_predictions(predictions)
-
-        if request.include_regex:
-            predictions.extend(regex_entities(cleaned_text, request.confidence_threshold))
-
-        entities = merge_predictions(predictions, request.confidence_threshold)
+        entities = await _run_extraction_with_slot(request)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         logger.exception("Inference failed")
-        raise HTTPException(status_code=500, detail=f"Erro na inferência: {e}") from e
+        raise HTTPException(status_code=500, detail="Erro na inferência") from e
 
     processing_time_ms = int((time.time() - start_time) * 1000)
     return ExtractResponse(
