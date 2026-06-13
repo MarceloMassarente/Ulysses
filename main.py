@@ -32,9 +32,9 @@ MAX_LENGTH = int(os.environ.get("LEGAL_NER_MAX_LENGTH", "512"))
 STRIDE = int(os.environ.get("LEGAL_NER_STRIDE", "128"))
 MAX_INPUT_CHARS = int(os.environ.get("LEGAL_NER_MAX_INPUT_CHARS", "50000"))
 DIRECT_PIPE_MAX_CHARS = int(os.environ.get("LEGAL_NER_DIRECT_PIPE_MAX_CHARS", "5000"))
-MAX_IN_FLIGHT = max(1, int(os.environ.get("LEGAL_NER_MAX_IN_FLIGHT", "1")))
+MAX_IN_FLIGHT = max(1, int(os.environ.get("LEGAL_NER_MAX_IN_FLIGHT", "4")))
 QUEUE_TIMEOUT_SECONDS = max(
-    0.0, float(os.environ.get("LEGAL_NER_QUEUE_TIMEOUT_SECONDS", "0.05"))
+    0.0, float(os.environ.get("LEGAL_NER_QUEUE_TIMEOUT_SECONDS", "5"))
 )
 REQUEST_TIMEOUT_SECONDS = max(
     0.0, float(os.environ.get("LEGAL_NER_REQUEST_TIMEOUT_SECONDS", "0"))
@@ -703,6 +703,7 @@ async def _acquire_infer_slot() -> None:
         raise HTTPException(
             status_code=503,
             detail="NER inference is busy; retry later",
+            headers={"Retry-After": str(max(1, int(QUEUE_TIMEOUT_SECONDS)))},
         ) from exc
 
 

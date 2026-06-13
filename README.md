@@ -25,7 +25,7 @@ LEGAL_NER_ENDPOINT=http://${{ulysses.RAILWAY_PRIVATE_DOMAIN}}/api/v1/extract
 - `GET /health` — readiness (conexao falha ate o app subir; depois 503 ate modelo carregar)
 - `POST /api/v1/extract` — body: `{ "text", "confidence_threshold", "include_regex" }`
 
-Por padrao o servico limita `text` a `LEGAL_NER_MAX_INPUT_CHARS=50000`, aceita uma inferencia por processo (`LEGAL_NER_MAX_IN_FLIGHT=1`) e sobe com um unico worker uvicorn para evitar multiplas copias do modelo.
+Por padrao o servico limita `text` a `LEGAL_NER_MAX_INPUT_CHARS=50000`, admite ate 4 requests por processo (`LEGAL_NER_MAX_IN_FLIGHT=4`) e aguarda ate 5s por slot antes de retornar 503. O container sobe com um unico worker uvicorn para evitar multiplas copias do modelo; o tokenizer continua protegido por lock interno.
 
 ## Local
 
