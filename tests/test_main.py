@@ -268,3 +268,59 @@ def test_extract_batch_endpoint_returns_indexed_results(monkeypatch) -> None:
     assert [item["index"] for item in body["results"]] == [0, 1]
     assert body["results"][0]["entities"][0]["text"] == "Ana"
     assert body["results"][1]["entities"][0]["text"] == "Bruno"
+
+
+def test_process_extraction_fills_metrics(monkeypatch) -> None:
+    class Tokenizer:
+        is_fast = True
+
+    class Pipe:
+        tokenizer = Tokenizer()
+
+        def __call__(self, text, stride=None):
+            return [{"entity_group": "PESSOA", "word": "Ana", "score": 0.9}]
+
+    monkeypatch.setattr(main, "ner_pipeline", Pipe())
+
+    metrics: dict[str, object] = {}
+    out = main.process_extraction("Ana peticionou.", 0.0, True, metrics)
+
+    assert metrics["batch_size"] == 1
+    assert metrics["entities"] == len(out)
+    for key in ("normalize_ms", "infer_ms", "regex_ms", "postprocess_ms"):
+        assert isinstance(metrics[key], float)
+
+
+def test_process_batch_extraction_fills_metrics(monkeypatch) -> None:
+    class Tokenizer:
+        is_fast = True
+
+    class Pipe:
+        tokenizer = Tokenizer()
+
+        def __call__(self, texts, stride=None):
+            return [
+                [{"entity_group": "PESSOA", "word": "Ana", "score": 0.9}],
+                [{"entity_group": "PESSOA", "word": "Bruno", "score": 0.8}],
+            ]
+
+    monkeypatch.setattr(main, "ner_pipeline", Pipe())
+
+    metrics: dict[str, object] = {}
+    out = main.process_batch_extraction(["Ana peticionou.", "Bruno contestou."], 0.0, False, metrics)
+
+    assert metrics["batch_size"] == 2
+    assert metrics["entities"] == sum(len(item) for item in out)
+    assert isinstance(metrics["infer_ms"], float)
+
+
+def test_health_reports_in_flight_and_counters(monkeypatch) -> None:
+    monkeypatch.setattr(main, "ner_pipeline", object())
+
+    body = TestClient(main.app).get("/health").json()
+
+    assert body["status"] == "ok"
+    assert body["in_flight"] == 0
+    assert {"requests_total", "batch_requests_total", "errors_503", "errors_504"} <= set(
+        body["requests"]
+    )

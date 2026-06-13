@@ -172,6 +172,16 @@ ner_pipeline: Any = None
 _infer_lock = threading.Lock()
 _infer_slots = asyncio.Semaphore(MAX_IN_FLIGHT)
 
+# Operational counters. Mutated only from the event-loop thread (async context),
+# so no lock is needed; inference threads never touch these.
+_in_flight = 0
+_request_counters: dict[str, int] = {
+    "requests_total": 0,
+    "batch_requests_total": 0,
+    "errors_503": 0,
+    "errors_504": 0,
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -770,53 +780,129 @@ def merge_predictions(
     return entities
 
 
+def _ms(start: float, end: float) -> float:
+    return round((end - start) * 1000, 1)
+
+
 def process_extraction(
     text: str,
     confidence_threshold: float,
     include_regex: bool,
+    metrics: dict[str, Any] | None = None,
 ) -> list[Entity]:
     if not math.isfinite(confidence_threshold):
         raise ValueError("confidence_threshold must be finite")
 
+    t0 = time.perf_counter()
     cleaned_text = normalize_pdf_text(text)
+    t1 = time.perf_counter()
     predictions = run_ner_inference(cleaned_text)
     predictions = reclassify_ner_predictions(predictions)
+    t2 = time.perf_counter()
 
     if include_regex:
         predictions.extend(regex_entities(cleaned_text, confidence_threshold))
+    t3 = time.perf_counter()
 
-    return merge_predictions(predictions, confidence_threshold)
+    entities = merge_predictions(predictions, confidence_threshold)
+    t4 = time.perf_counter()
+
+    if metrics is not None:
+        metrics.update(
+            {
+                "batch_size": 1,
+                "normalize_ms": _ms(t0, t1),
+                "infer_ms": _ms(t1, t2),
+                "regex_ms": _ms(t2, t3),
+                "postprocess_ms": _ms(t3, t4),
+                "entities": len(entities),
+            }
+        )
+    return entities
 
 
 def process_batch_extraction(
     texts: list[str],
     confidence_threshold: float,
     include_regex: bool,
+    metrics: dict[str, Any] | None = None,
 ) -> list[list[Entity]]:
     if not math.isfinite(confidence_threshold):
         raise ValueError("confidence_threshold must be finite")
 
+    t0 = time.perf_counter()
     cleaned_texts = [normalize_pdf_text(text) for text in texts]
+    t1 = time.perf_counter()
     prediction_batches = run_ner_inference_batch(cleaned_texts)
+    t2 = time.perf_counter()
 
+    regex_seconds = 0.0
     results: list[list[Entity]] = []
     for cleaned_text, predictions in zip(cleaned_texts, prediction_batches, strict=True):
         predictions = reclassify_ner_predictions(predictions)
         if include_regex:
+            r0 = time.perf_counter()
             predictions.extend(regex_entities(cleaned_text, confidence_threshold))
+            regex_seconds += time.perf_counter() - r0
         results.append(merge_predictions(predictions, confidence_threshold))
+    t3 = time.perf_counter()
+
+    if metrics is not None:
+        regex_ms = round(regex_seconds * 1000, 1)
+        metrics.update(
+            {
+                "batch_size": len(texts),
+                "normalize_ms": _ms(t0, t1),
+                "infer_ms": _ms(t1, t2),
+                "regex_ms": regex_ms,
+                # reclassify + merge time (loop total minus regex)
+                "postprocess_ms": round(_ms(t2, t3) - regex_ms, 1),
+                "entities": sum(len(item) for item in results),
+            }
+        )
     return results
 
 
-async def _acquire_infer_slot() -> None:
+async def _acquire_infer_slot(metrics: dict[str, Any] | None = None) -> None:
+    global _in_flight
     try:
         await asyncio.wait_for(_infer_slots.acquire(), timeout=QUEUE_TIMEOUT_SECONDS)
     except TimeoutError as exc:
+        _request_counters["errors_503"] += 1
         raise HTTPException(
             status_code=503,
             detail="NER inference is busy; retry later",
             headers={"Retry-After": str(max(1, int(QUEUE_TIMEOUT_SECONDS)))},
         ) from exc
+    _in_flight += 1
+    if metrics is not None:
+        # Slots occupied at the moment this request started inference (incl. self).
+        metrics["in_flight"] = _in_flight
+
+
+def _release_infer_slot() -> None:
+    global _in_flight
+    _in_flight -= 1
+    _infer_slots.release()
+
+
+def _log_request_metrics(
+    endpoint: str, outcome: str, total_ms: int, metrics: dict[str, Any]
+) -> None:
+    logger.info(
+        "ner_request endpoint=%s outcome=%s total_ms=%d in_flight=%s batch_size=%s "
+        "normalize_ms=%s infer_ms=%s regex_ms=%s postprocess_ms=%s entities=%s",
+        endpoint,
+        outcome,
+        total_ms,
+        metrics.get("in_flight"),
+        metrics.get("batch_size"),
+        metrics.get("normalize_ms"),
+        metrics.get("infer_ms"),
+        metrics.get("regex_ms"),
+        metrics.get("postprocess_ms"),
+        metrics.get("entities"),
+    )
 
 
 def _release_slot_after_timeout(task: asyncio.Task[Any]) -> None:
@@ -825,17 +911,20 @@ def _release_slot_after_timeout(task: asyncio.Task[Any]) -> None:
     except Exception:
         logger.exception("Timed-out inference finished with error")
     finally:
-        _infer_slots.release()
+        _release_infer_slot()
 
 
-async def _run_extraction_with_slot(request: ExtractRequest) -> list[Entity]:
-    await _acquire_infer_slot()
+async def _run_extraction_with_slot(
+    request: ExtractRequest, metrics: dict[str, Any]
+) -> list[Entity]:
+    await _acquire_infer_slot(metrics)
     worker_task = asyncio.create_task(
         asyncio.to_thread(
             process_extraction,
             request.text,
             request.confidence_threshold,
             request.include_regex,
+            metrics,
         )
     )
     release_in_finally = True
@@ -848,6 +937,7 @@ async def _run_extraction_with_slot(request: ExtractRequest) -> list[Entity]:
                 )
             except TimeoutError as exc:
                 release_in_finally = False
+                _request_counters["errors_504"] += 1
                 worker_task.add_done_callback(_release_slot_after_timeout)
                 raise HTTPException(
                     status_code=504,
@@ -856,17 +946,20 @@ async def _run_extraction_with_slot(request: ExtractRequest) -> list[Entity]:
         return await worker_task
     finally:
         if release_in_finally:
-            _infer_slots.release()
+            _release_infer_slot()
 
 
-async def _run_batch_extraction_with_slot(request: BatchExtractRequest) -> list[list[Entity]]:
-    await _acquire_infer_slot()
+async def _run_batch_extraction_with_slot(
+    request: BatchExtractRequest, metrics: dict[str, Any]
+) -> list[list[Entity]]:
+    await _acquire_infer_slot(metrics)
     worker_task = asyncio.create_task(
         asyncio.to_thread(
             process_batch_extraction,
             request.texts,
             request.confidence_threshold,
             request.include_regex,
+            metrics,
         )
     )
     release_in_finally = True
@@ -879,6 +972,7 @@ async def _run_batch_extraction_with_slot(request: BatchExtractRequest) -> list[
                 )
             except TimeoutError as exc:
                 release_in_finally = False
+                _request_counters["errors_504"] += 1
                 worker_task.add_done_callback(_release_slot_after_timeout)
                 raise HTTPException(
                     status_code=504,
@@ -887,7 +981,7 @@ async def _run_batch_extraction_with_slot(request: BatchExtractRequest) -> list[
         return await worker_task
     finally:
         if release_in_finally:
-            _infer_slots.release()
+            _release_infer_slot()
 
 
 @app.get("/health")
@@ -897,6 +991,8 @@ async def health_check():
     payload: dict[str, Any] = {
         "status": "ok",
         "busy": _infer_slots.locked(),
+        "in_flight": _in_flight,
+        "requests": dict(_request_counters),
     }
     if EXPOSE_HEALTH_CONFIG:
         payload.update(
@@ -920,11 +1016,16 @@ async def extract_entities(request: ExtractRequest):
     if ner_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    _request_counters["requests_total"] += 1
     start_time = time.time()
+    metrics: dict[str, Any] = {}
 
     try:
-        entities = await _run_extraction_with_slot(request)
-    except HTTPException:
+        entities = await _run_extraction_with_slot(request, metrics)
+    except HTTPException as e:
+        _log_request_metrics(
+            "extract", f"http_{e.status_code}", int((time.time() - start_time) * 1000), metrics
+        )
         raise
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -933,6 +1034,7 @@ async def extract_entities(request: ExtractRequest):
         raise HTTPException(status_code=500, detail="Erro na inferência") from e
 
     processing_time_ms = int((time.time() - start_time) * 1000)
+    _log_request_metrics("extract", "success", processing_time_ms, metrics)
     return ExtractResponse(
         status="success",
         processing_time_ms=processing_time_ms,
@@ -945,11 +1047,16 @@ async def extract_entities_batch(request: BatchExtractRequest):
     if ner_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    _request_counters["batch_requests_total"] += 1
     start_time = time.time()
+    metrics: dict[str, Any] = {}
 
     try:
-        results = await _run_batch_extraction_with_slot(request)
-    except HTTPException:
+        results = await _run_batch_extraction_with_slot(request, metrics)
+    except HTTPException as e:
+        _log_request_metrics(
+            "extract_batch", f"http_{e.status_code}", int((time.time() - start_time) * 1000), metrics
+        )
         raise
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -958,6 +1065,7 @@ async def extract_entities_batch(request: BatchExtractRequest):
         raise HTTPException(status_code=500, detail="Erro na inferencia em lote") from e
 
     processing_time_ms = int((time.time() - start_time) * 1000)
+    _log_request_metrics("extract_batch", "success", processing_time_ms, metrics)
     return BatchExtractResponse(
         status="success",
         processing_time_ms=processing_time_ms,

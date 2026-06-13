@@ -28,6 +28,6 @@ Endpoints expostos:
 
 Use o endpoint batch no worker do RAGjuridico para processar chunks em lotes. `include_regex=false` evita duplicar regex quando o RAGjuridico ja extrai citacoes e identificadores localmente.
 
-Health: `GET /health` (durante cold start pode haver falha de conexao ate o app subir; depois 503 ate o modelo carregar).
+Health: `GET /health` (durante cold start pode haver falha de conexao ate o app subir; depois 503 ate o modelo carregar). O payload inclui `in_flight` e contadores `requests` (`requests_total`, `batch_requests_total`, `errors_503`, `errors_504`). Cada chamada emite um log `ner_request` com breakdown de tempos (`normalize_ms`, `infer_ms`, `regex_ms`, `postprocess_ms`, `batch_size`, `entities`) — use para acompanhar 503 sob carga mista e dimensionar `LEGAL_NER_MAX_BATCH_ITEMS` contra `LEGAL_NER_QUEUE_TIMEOUT_SECONDS`.
 
 Guia stack completo: `RAGjuridico/docs/operations/deploy-railway-stack.md`
