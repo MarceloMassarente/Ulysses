@@ -7,6 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import main  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from main import (  # noqa: E402
     clean_entity_text,
     is_noisy_entity,
@@ -14,6 +16,7 @@ from main import (  # noqa: E402
     merge_predictions,
     normalize_legal_text,
     normalize_pdf_text,
+    process_batch_extraction,
     reclassify_ner_predictions,
     regex_entities,
 )
@@ -206,3 +209,62 @@ def test_regex_common_unformatted_ids_and_lei_numero() -> None:
     found = regex_entities(text, 0.0)
     labels = {e["entity_group"] for e in found}
     assert {"CPF", "CNPJ", "LEGISLACAO"} <= labels
+
+
+def test_process_batch_extraction_uses_pipeline_batch(monkeypatch) -> None:
+    calls = []
+
+    class Tokenizer:
+        is_fast = True
+
+    class Pipe:
+        tokenizer = Tokenizer()
+
+        def __call__(self, texts, stride=None):
+            calls.append((texts, stride))
+            return [
+                [{"entity_group": "PESSOA", "word": "Ana", "score": 0.9}],
+                [{"entity_group": "PESSOA", "word": "Bruno", "score": 0.8}],
+            ]
+
+    monkeypatch.setattr(main, "ner_pipeline", Pipe())
+
+    out = process_batch_extraction(["Ana peticionou.", "Bruno contestou."], 0.5, False)
+
+    assert len(out) == 2
+    assert out[0][0].text == "Ana"
+    assert out[1][0].text == "Bruno"
+    assert len(calls) == 1
+    assert calls[0][0] == ["Ana peticionou.", "Bruno contestou."]
+
+
+def test_extract_batch_endpoint_returns_indexed_results(monkeypatch) -> None:
+    class Tokenizer:
+        is_fast = True
+
+    class Pipe:
+        tokenizer = Tokenizer()
+
+        def __call__(self, texts, stride=None):
+            return [
+                [{"entity_group": "PESSOA", "word": "Ana", "score": 0.9}],
+                [{"entity_group": "PESSOA", "word": "Bruno", "score": 0.8}],
+            ]
+
+    monkeypatch.setattr(main, "ner_pipeline", Pipe())
+
+    response = TestClient(main.app).post(
+        "/api/v1/extract_batch",
+        json={
+            "texts": ["Ana peticionou.", "Bruno contestou."],
+            "confidence_threshold": 0.5,
+            "include_regex": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert [item["index"] for item in body["results"]] == [0, 1]
+    assert body["results"][0]["entities"][0]["text"] == "Ana"
+    assert body["results"][1]["entities"][0]["text"] == "Bruno"

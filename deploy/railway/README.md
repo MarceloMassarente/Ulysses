@@ -17,9 +17,16 @@ No servico `api` e `worker` do RAGjuridico:
 
 ```env
 LEGAL_NER_ENDPOINT=http://${{ulysses.RAILWAY_PRIVATE_DOMAIN}}/api/v1/extract
+LEGAL_NER_BATCH_ENDPOINT=http://${{ulysses.RAILWAY_PRIVATE_DOMAIN}}/api/v1/extract_batch
+LEGAL_NER_INCLUDE_REGEX=false
 ```
 
-Endpoint exposto: `POST /api/v1/extract` (payload: `text`, `confidence_threshold`, `include_regex`).
+Endpoints expostos:
+
+- `POST /api/v1/extract` (payload: `text`, `confidence_threshold`, `include_regex`)
+- `POST /api/v1/extract_batch` (payload: `texts`, `confidence_threshold`, `include_regex`)
+
+Use o endpoint batch no worker do RAGjuridico para processar chunks em lotes. `include_regex=false` evita duplicar regex quando o RAGjuridico ja extrai citacoes e identificadores localmente.
 
 Health: `GET /health` (durante cold start pode haver falha de conexao ate o app subir; depois 503 ate o modelo carregar).
 

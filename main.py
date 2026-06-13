@@ -19,7 +19,7 @@ os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "8"))
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
 
 logger = logging.getLogger("ulysses_ner")
@@ -32,9 +32,10 @@ MAX_LENGTH = int(os.environ.get("LEGAL_NER_MAX_LENGTH", "512"))
 STRIDE = int(os.environ.get("LEGAL_NER_STRIDE", "128"))
 MAX_INPUT_CHARS = int(os.environ.get("LEGAL_NER_MAX_INPUT_CHARS", "50000"))
 DIRECT_PIPE_MAX_CHARS = int(os.environ.get("LEGAL_NER_DIRECT_PIPE_MAX_CHARS", "5000"))
-MAX_IN_FLIGHT = max(1, int(os.environ.get("LEGAL_NER_MAX_IN_FLIGHT", "4")))
+MAX_BATCH_ITEMS = max(1, int(os.environ.get("LEGAL_NER_MAX_BATCH_ITEMS", "32")))
+MAX_IN_FLIGHT = max(1, int(os.environ.get("LEGAL_NER_MAX_IN_FLIGHT", "2")))
 QUEUE_TIMEOUT_SECONDS = max(
-    0.0, float(os.environ.get("LEGAL_NER_QUEUE_TIMEOUT_SECONDS", "5"))
+    0.0, float(os.environ.get("LEGAL_NER_QUEUE_TIMEOUT_SECONDS", "30"))
 )
 REQUEST_TIMEOUT_SECONDS = max(
     0.0, float(os.environ.get("LEGAL_NER_REQUEST_TIMEOUT_SECONDS", "0"))
@@ -261,6 +262,36 @@ class ExtractRequest(BaseModel):
     )
 
 
+class BatchExtractRequest(BaseModel):
+    texts: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_BATCH_ITEMS,
+        description="Raw texts to process as one NER batch",
+    )
+    confidence_threshold: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Minimum confidence score for extracted entities",
+    )
+    include_regex: bool = Field(
+        False,
+        description="Merge high-precision regex entities (CPF, CNPJ, processo, etc.)",
+    )
+
+    @field_validator("texts")
+    @classmethod
+    def validate_texts(cls, texts: list[str]) -> list[str]:
+        for idx, text in enumerate(texts):
+            if not text.strip():
+                raise ValueError(f"texts[{idx}] must not be empty")
+            if len(text) > MAX_INPUT_CHARS:
+                raise ValueError(f"texts[{idx}] exceeds max length {MAX_INPUT_CHARS}")
+        return texts
+
+
 class Entity(BaseModel):
     entity_group: str
     text: str
@@ -275,6 +306,17 @@ class ExtractResponse(BaseModel):
     status: str
     processing_time_ms: int
     entities: list[Entity]
+
+
+class BatchExtractItem(BaseModel):
+    index: int
+    entities: list[Entity]
+
+
+class BatchExtractResponse(BaseModel):
+    status: str
+    processing_time_ms: int
+    results: list[BatchExtractItem]
 
 
 def clean_entity_text(text: str) -> str:
@@ -620,6 +662,56 @@ def run_ner_inference(cleaned_text: str) -> list[dict[str, Any]]:
     return predictions
 
 
+def _as_prediction_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def run_ner_inference_batch(cleaned_texts: list[str]) -> list[list[dict[str, Any]]]:
+    """Run NER for many short/medium texts with one Transformers pipeline call."""
+    if not cleaned_texts:
+        return []
+
+    pipe = ner_pipeline
+    out: list[list[dict[str, Any]] | None] = [None] * len(cleaned_texts)
+    batch_items: list[tuple[int, str]] = []
+
+    for idx, text in enumerate(cleaned_texts):
+        if not text.strip():
+            out[idx] = []
+        elif (
+            pipe.tokenizer.is_fast
+            and STRIDE > 0
+            and len(text) <= DIRECT_PIPE_MAX_CHARS
+        ):
+            batch_items.append((idx, text))
+        else:
+            out[idx] = run_ner_inference(text)
+
+    if batch_items:
+        indices = [idx for idx, _text in batch_items]
+        texts = [text for _idx, text in batch_items]
+        try:
+            with _infer_lock:
+                raw_batch = pipe(texts, stride=STRIDE)
+            if isinstance(raw_batch, list) and len(raw_batch) == len(texts):
+                for idx, raw in zip(indices, raw_batch, strict=True):
+                    out[idx] = _as_prediction_list(raw)
+            else:
+                logger.warning("Unexpected batch NER shape; falling back to per-text inference")
+                for idx, text in batch_items:
+                    out[idx] = run_ner_inference(text)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Batch NER inference failed (%s); falling back to per-text inference", exc)
+            for idx, text in batch_items:
+                out[idx] = run_ner_inference(text)
+
+    return [predictions or [] for predictions in out]
+
+
 def _effective_threshold(group: str, source: str, threshold: float) -> float:
     if source == "regex":
         return 0.0
@@ -696,6 +788,26 @@ def process_extraction(
     return merge_predictions(predictions, confidence_threshold)
 
 
+def process_batch_extraction(
+    texts: list[str],
+    confidence_threshold: float,
+    include_regex: bool,
+) -> list[list[Entity]]:
+    if not math.isfinite(confidence_threshold):
+        raise ValueError("confidence_threshold must be finite")
+
+    cleaned_texts = [normalize_pdf_text(text) for text in texts]
+    prediction_batches = run_ner_inference_batch(cleaned_texts)
+
+    results: list[list[Entity]] = []
+    for cleaned_text, predictions in zip(cleaned_texts, prediction_batches, strict=True):
+        predictions = reclassify_ner_predictions(predictions)
+        if include_regex:
+            predictions.extend(regex_entities(cleaned_text, confidence_threshold))
+        results.append(merge_predictions(predictions, confidence_threshold))
+    return results
+
+
 async def _acquire_infer_slot() -> None:
     try:
         await asyncio.wait_for(_infer_slots.acquire(), timeout=QUEUE_TIMEOUT_SECONDS)
@@ -707,7 +819,7 @@ async def _acquire_infer_slot() -> None:
         ) from exc
 
 
-def _release_slot_after_timeout(task: asyncio.Task[list[Entity]]) -> None:
+def _release_slot_after_timeout(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except Exception:
@@ -722,6 +834,37 @@ async def _run_extraction_with_slot(request: ExtractRequest) -> list[Entity]:
         asyncio.to_thread(
             process_extraction,
             request.text,
+            request.confidence_threshold,
+            request.include_regex,
+        )
+    )
+    release_in_finally = True
+    try:
+        if REQUEST_TIMEOUT_SECONDS > 0:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(worker_task),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                release_in_finally = False
+                worker_task.add_done_callback(_release_slot_after_timeout)
+                raise HTTPException(
+                    status_code=504,
+                    detail="NER inference timed out",
+                ) from exc
+        return await worker_task
+    finally:
+        if release_in_finally:
+            _infer_slots.release()
+
+
+async def _run_batch_extraction_with_slot(request: BatchExtractRequest) -> list[list[Entity]]:
+    await _acquire_infer_slot()
+    worker_task = asyncio.create_task(
+        asyncio.to_thread(
+            process_batch_extraction,
+            request.texts,
             request.confidence_threshold,
             request.include_regex,
         )
@@ -764,6 +907,7 @@ async def health_check():
                 "max_length": MAX_LENGTH,
                 "stride": STRIDE,
                 "max_input_chars": MAX_INPUT_CHARS,
+                "max_batch_items": MAX_BATCH_ITEMS,
                 "max_in_flight": MAX_IN_FLIGHT,
                 "jurisprudencia_ner_threshold": JURISPRUDENCIA_NER_THRESHOLD,
             }
@@ -793,4 +937,32 @@ async def extract_entities(request: ExtractRequest):
         status="success",
         processing_time_ms=processing_time_ms,
         entities=entities,
+    )
+
+
+@app.post("/api/v1/extract_batch", response_model=BatchExtractResponse)
+async def extract_entities_batch(request: BatchExtractRequest):
+    if ner_pipeline is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    start_time = time.time()
+
+    try:
+        results = await _run_batch_extraction_with_slot(request)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Batch inference failed")
+        raise HTTPException(status_code=500, detail="Erro na inferencia em lote") from e
+
+    processing_time_ms = int((time.time() - start_time) * 1000)
+    return BatchExtractResponse(
+        status="success",
+        processing_time_ms=processing_time_ms,
+        results=[
+            BatchExtractItem(index=index, entities=entities)
+            for index, entities in enumerate(results)
+        ],
     )
